@@ -92,35 +92,6 @@ export function RabbitAvatar({
         />
       </div>
 
-      {/* Status indicator - prominent display */}
-      <div className={styles.statusSection}>
-        <div 
-          className={`${styles.statusIndicator} ${isActive ? styles.statusActive : ""}`}
-          style={{ 
-            backgroundColor: `${accentColor}15`,
-            borderColor: `${accentColor}40`,
-          }}
-        >
-          {statusIcon && (
-            <span className={`${styles.statusIcon} ${isActive ? styles.iconPulse : ""}`}>
-              {statusIcon}
-            </span>
-          )}
-          <span 
-            className={styles.statusText}
-            style={{ color: isActive ? accentColor : undefined }}
-          >
-            {statusText || STATUS_LABELS[status]}
-          </span>
-          {isActive && <span className={styles.dots} />}
-        </div>
-      </div>
-
-      {/* Title */}
-      <div className={styles.title}>
-        <span className={styles.titleIcon}>🐰</span>
-        AI Character
-      </div>
     </div>
   );
 }

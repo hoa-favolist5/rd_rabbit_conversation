@@ -95,7 +95,7 @@ export default function Home() {
             </div>
           )}
 
-          {/* Workflow Timing display */}
+          
           <WorkflowTimingDisplay timing={workflowTiming} />
         </aside>
 
@@ -110,12 +110,6 @@ export default function Home() {
         </section>
       </main>
 
-      {/* Footer */}
-      <footer className={styles.footer}>
-        <p>
-          Powered by Claude 3.5 Haiku • AWS Transcribe • Azure Neural TTS
-        </p>
-      </footer>
     </div>
   );
 }
