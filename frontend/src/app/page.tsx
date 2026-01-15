@@ -1,9 +1,10 @@
 "use client";
 
-import React, { useCallback } from "react";
+import React, { useCallback, useMemo } from "react";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useAudioPlayer } from "@/hooks/useAudioPlayer";
 import { RabbitAvatar, ChatHistory, ChatInput, WorkflowTimingDisplay } from "@/components";
+import type { ConversationStatus } from "@/types";
 import styles from "./page.module.css";
 
 // WebSocket URL - connect to backend
@@ -30,7 +31,7 @@ export default function Home() {
 
   const {
     isConnected,
-    status,
+    status: wsStatus,
     emotion,
     statusText,
     messages,
@@ -42,6 +43,22 @@ export default function Home() {
     onAudio: handleAudio,
     onAudioChunk: handleAudioChunk,
   });
+
+  // Derive actual status: override to "speaking" when audio is playing
+  const status: ConversationStatus = useMemo(() => {
+    if (audioPlayer.isPlaying) {
+      return "speaking";
+    }
+    return wsStatus;
+  }, [audioPlayer.isPlaying, wsStatus]);
+
+  // Derive status text based on actual status
+  const displayStatusText = useMemo(() => {
+    if (audioPlayer.isPlaying) {
+      return "話しています...";
+    }
+    return statusText;
+  }, [audioPlayer.isPlaying, statusText]);
 
   return (
     <div className={styles.container}>
@@ -58,7 +75,7 @@ export default function Home() {
           <RabbitAvatar
             emotion={emotion}
             status={status}
-            statusText={statusText}
+            statusText={displayStatusText}
             isConnected={isConnected}
           />
 

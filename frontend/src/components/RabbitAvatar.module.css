@@ -1,74 +1,128 @@
 .container {
-  min-width: 280px;
-  border: 3px solid #6b7280;
-  border-radius: 16px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 300px;
   padding: 24px;
-  text-align: center;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
-  transition: all 0.3s ease;
-  background: linear-gradient(135deg, rgba(107, 114, 128, 0.05), rgba(107, 114, 128, 0.1));
+  background: linear-gradient(180deg, #1a1a2e 0%, #16213e 50%, #0f0f23 100%);
+  border-radius: 24px;
+  border: 2px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 
+    0 4px 24px rgba(0, 0, 0, 0.4),
+    0 0 0 1px rgba(255, 255, 255, 0.05) inset;
+  transition: border-color 0.3s ease, box-shadow 0.3s ease;
 }
 
-.connectionStatus {
+.container.active {
+  box-shadow: 
+    0 8px 32px rgba(0, 0, 0, 0.5),
+    0 0 0 1px rgba(255, 255, 255, 0.08) inset;
+}
+
+.connectionBadge {
+  position: absolute;
+  top: 16px;
+  left: 16px;
   display: flex;
   align-items: center;
-  justify-content: center;
   gap: 6px;
+  padding: 6px 12px;
+  border-radius: 20px;
   font-size: 12px;
-  color: #666;
-  margin-bottom: 8px;
+  font-weight: 500;
+  transition: all 0.3s ease;
+}
+
+.connectionBadge.connected {
+  background: rgba(52, 211, 153, 0.15);
+  color: #34d399;
+  border: 1px solid rgba(52, 211, 153, 0.3);
+}
+
+.connectionBadge.disconnected {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.3);
 }
 
 .connectionDot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
+  background: currentColor;
+  animation: pulse 2s ease-in-out infinite;
 }
 
-.connected {
-  background: #10b981;
-  animation: pulse 2s infinite;
+.disconnected .connectionDot {
+  animation: none;
 }
 
-.disconnected {
-  background: #ef4444;
-}
-
-.title {
-  font-size: 14px;
-  color: #666;
-  margin-bottom: 8px;
-}
-
-.face {
-  font-size: 56px;
-  font-family: "Hiragino Kaku Gothic Pro", "メイリオ", sans-serif;
-  margin: 16px 0;
-  transition: all 0.3s ease;
-}
-
-.thinking {
-  animation: thinking 1.5s ease-in-out infinite;
-}
-
-.emotionLabel {
-  font-size: 16px;
-  font-weight: bold;
-  margin-bottom: 12px;
-  transition: color 0.3s ease;
-}
-
-.status {
-  font-size: 14px;
-  color: #666;
+.characterWrapper {
+  position: relative;
+  width: 220px;
+  height: 220px;
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  margin: 20px 0;
 }
 
-.pulse {
-  animation: pulse 1s infinite;
+.characterGlow {
+  position: absolute;
+  inset: 10px;
+  border-radius: 50%;
+  pointer-events: none;
+  transition: box-shadow 0.5s ease;
+}
+
+.characterGlow.glowActive {
+  animation: glowPulse 2s ease-in-out infinite;
+}
+
+.character {
+  width: 200px;
+  height: 200px;
+  filter: drop-shadow(0 4px 12px rgba(0, 0, 0, 0.3));
+}
+
+.statusSection {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  margin-bottom: 16px;
+}
+
+.statusIndicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border-radius: 24px;
+  border: 1px solid;
+  transition: all 0.3s ease;
+  min-width: 160px;
+  justify-content: center;
+}
+
+.statusIndicator.statusActive {
+  transform: scale(1.02);
+}
+
+.statusIcon {
+  font-size: 16px;
+  transition: transform 0.3s ease;
+}
+
+.statusIcon.iconPulse {
+  animation: iconBounce 1s ease-in-out infinite;
+}
+
+.statusText {
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.8);
+  font-weight: 600;
+  transition: color 0.3s ease;
 }
 
 .dots::after {
@@ -76,21 +130,47 @@
   animation: dots 1.5s steps(4) infinite;
 }
 
+.title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.5);
+  font-weight: 500;
+  letter-spacing: 0.5px;
+}
+
+.titleIcon {
+  font-size: 16px;
+}
+
+/* Animations */
 @keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.6;
+    transform: scale(0.95);
+  }
+}
+
+@keyframes glowPulse {
   0%, 100% {
     opacity: 1;
   }
   50% {
-    opacity: 0.5;
+    opacity: 0.7;
   }
 }
 
-@keyframes thinking {
+@keyframes iconBounce {
   0%, 100% {
-    transform: translateY(0);
+    transform: scale(1);
   }
   50% {
-    transform: translateY(-5px);
+    transform: scale(1.15);
   }
 }
 
@@ -106,5 +186,23 @@
   }
   75% {
     content: "...";
+  }
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .container {
+    min-width: 260px;
+    padding: 20px;
+  }
+
+  .characterWrapper {
+    width: 180px;
+    height: 180px;
+  }
+
+  .character {
+    width: 160px;
+    height: 160px;
   }
 }
