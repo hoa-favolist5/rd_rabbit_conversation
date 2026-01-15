@@ -1,6 +1,34 @@
 import { pool } from "./connection.js";
 import type { Movie, MovieSearchResult } from "../types/index.js";
 
+const MOVIE_CACHE_TTL_MS = 2 * 60 * 1000;
+const MOVIE_CACHE_LIMIT = 200;
+const movieSearchCache = new Map<string, { value: MovieSearchResult; timestamp: number }>();
+
+function getCacheKey(query: string, genre?: string, year?: number): string {
+  return `${query.trim().toLowerCase()}|${genre || ""}|${year || ""}`;
+}
+
+function getCachedResult(key: string): MovieSearchResult | null {
+  const entry = movieSearchCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.timestamp > MOVIE_CACHE_TTL_MS) {
+    movieSearchCache.delete(key);
+    return null;
+  }
+  return entry.value;
+}
+
+function setCachedResult(key: string, value: MovieSearchResult): void {
+  if (movieSearchCache.size >= MOVIE_CACHE_LIMIT) {
+    const firstKey = movieSearchCache.keys().next().value as string | undefined;
+    if (firstKey) {
+      movieSearchCache.delete(firstKey);
+    }
+  }
+  movieSearchCache.set(key, { value, timestamp: Date.now() });
+}
+
 /**
  * Search movies by query, genre, and/or year
  */
@@ -10,11 +38,15 @@ export async function searchMovies(
   year?: number
 ): Promise<MovieSearchResult> {
   try {
+    const cacheKey = getCacheKey(query, genre, year);
+    const cached = getCachedResult(cacheKey);
+    if (cached) {
+      return cached;
+    }
     let sql = `
       SELECT         
         title, 
-        overview, 
-        genre, 
+        overview,         
         release_date, 
         vote_average        
       FROM data_archive_movie_master
@@ -48,7 +80,7 @@ export async function searchMovies(
     }
 
     // Order by rating and limit results
-    sql += ` ORDER BY rating DESC NULLS LAST LIMIT 10`;
+    sql += ` ORDER BY vote_average DESC NULLS LAST LIMIT 10`;
 
     const result = await pool.query(sql, params);
     
@@ -64,10 +96,12 @@ export async function searchMovies(
       actors: row.actors || [],
     }));
 
-    return {
+    const response = {
       movies,
       total: movies.length,
     };
+    setCachedResult(cacheKey, response);
+    return response;
   } catch (error) {
     console.error("Movie search error:", error);
     // Return empty result on error (database might not be set up)

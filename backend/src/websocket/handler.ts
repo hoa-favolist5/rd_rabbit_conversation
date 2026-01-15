@@ -1,6 +1,6 @@
 import { WebSocket } from "ws";
 import { v4 as uuidv4 } from "uuid";
-import { chat } from "../services/claude.js";
+import { chat, needsMovieSearch } from "../services/claude.js";
 import { synthesizeSpeechBase64 } from "../services/azure-tts.js";
 import { searchMovies } from "../db/movies.js";
 import { startTimer } from "../utils/timer.js";
@@ -233,14 +233,27 @@ function sendUserMessage(ws: WebSocket, text: string): void {
 function sendAssistantMessage(
   ws: WebSocket,
   text: string,
-  emotion: EmotionType
+  emotion: EmotionType,
+  messageId?: string
 ): void {
   const message: AssistantMessage = {
     type: "assistant_message",
     text,
     emotion,
+    ...(messageId ? { messageId } : {}),
   };
   send(ws, message);
+}
+
+/**
+ * Send assistant streaming delta
+ */
+function sendAssistantDelta(ws: WebSocket, text: string, messageId: string): void {
+  send(ws, {
+    type: "assistant_delta",
+    text,
+    messageId,
+  });
 }
 
 /**
@@ -300,31 +313,60 @@ async function processUserInput(session: Session, userText: string): Promise<voi
 
     // STEP 4-6: LLM Request and Response
     workflow.startStep("STEP4_LLM_REQUEST");
-    
+
+    const assistantMessageId = `assistant-${session.id}-${Date.now()}`;
+
+    // Prefetch movie search in parallel when likely needed
+    const shouldPrefetchMovies = needsMovieSearch(userText);
+    const prefetchPromise = shouldPrefetchMovies
+      ? (async () => {
+          const prefetchTimer = startTimer("DB Search (Prefetch)", { query: userText });
+          const result = await searchMovies(userText);
+          const timing = prefetchTimer.stop();
+          workflow.recordDbSearch(timing.durationMs);
+          return result;
+        })().catch(() => null)
+      : null;
+
     const response = await chat(
       history,
       userText,
       async (query, genre, year) => {
         // Track DB search within LLM step
+        if (
+          prefetchPromise &&
+          query.trim() === userText.trim() &&
+          !genre &&
+          !year
+        ) {
+          const prefetched = await prefetchPromise;
+          if (prefetched) {
+            return prefetched;
+          }
+        }
+
         const dbTimer = startTimer("DB Search", { query, genre, year });
         const result = await searchMovies(query, genre, year);
         const dbTiming = dbTimer.stop();
         workflow.recordDbSearch(dbTiming.durationMs);
         return result;
+      },
+      (delta) => {
+        // Stream partial text to client for faster perceived response
+        sendAssistantDelta(ws, delta, assistantMessageId);
       }
     );
-    
-    workflow.endStep({ 
-      inputLength: userText.length, 
+
+    workflow.endStep({
+      inputLength: userText.length,
       usedTool: response.usedTool,
-      hasToolUse: workflow.getSummary().hasDbSearch 
+      hasToolUse: workflow.getSummary().hasDbSearch
     });
-    
-    // Log tool usage for performance monitoring
+
     if (response.usedTool) {
-      console.log(`🔧 Tool used: movie search (2 API calls)`);
+      console.log("🔧 Tool used: movie search (2 API calls)");
     } else {
-      console.log(`⚡ No tool used: single API call`);
+      console.log("⚡ No tool used: single API call");
     }
 
     // Update conversation history
@@ -338,7 +380,7 @@ async function processUserInput(session: Session, userText: string): Promise<voi
 
     // STEP 7: Send text response
     workflow.startStep("STEP7_TEXT_RESPONSE");
-    sendAssistantMessage(ws, response.text, response.emotion);
+    sendAssistantMessage(ws, response.text, response.emotion, assistantMessageId);
     session.status = "speaking";
     sendStatus(ws, "speaking", response.emotion, "話しています...");
     workflow.endStep({ textLength: response.text.length, emotion: response.emotion });

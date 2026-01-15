@@ -142,7 +142,34 @@ export function useWebSocket({
           ]);
           break;
 
-        case "assistant_message":
+        case "assistant_message": {
+          const messageId = message.messageId as string | undefined;
+          if (messageId) {
+            setMessages((prev) => {
+              const index = prev.findIndex((m) => m.id === messageId);
+              if (index >= 0) {
+                const updated = [...prev];
+                updated[index] = {
+                  ...updated[index],
+                  content: message.text as string,
+                  emotion: message.emotion as EmotionType,
+                };
+                return updated;
+              }
+              return [
+                ...prev,
+                {
+                  id: messageId,
+                  role: "assistant",
+                  content: message.text as string,
+                  emotion: message.emotion as EmotionType,
+                  timestamp: new Date(),
+                },
+              ];
+            });
+            break;
+          }
+
           setMessages((prev) => [
             ...prev,
             {
@@ -154,6 +181,35 @@ export function useWebSocket({
             },
           ]);
           break;
+        }
+
+        case "assistant_delta": {
+          const messageId = message.messageId as string;
+          const delta = message.text as string;
+          if (!messageId || !delta) break;
+
+          setMessages((prev) => {
+            const index = prev.findIndex((m) => m.id === messageId);
+            if (index >= 0) {
+              const updated = [...prev];
+              updated[index] = {
+                ...updated[index],
+                content: `${updated[index].content}${delta}`,
+              };
+              return updated;
+            }
+            return [
+              ...prev,
+              {
+                id: messageId,
+                role: "assistant",
+                content: delta,
+                timestamp: new Date(),
+              },
+            ];
+          });
+          break;
+        }
 
         case "audio":
           onAudio?.(message.data as string, message.format as string);

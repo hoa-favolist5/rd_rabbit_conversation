@@ -35,6 +35,13 @@ export interface AssistantMessage {
   type: "assistant_message";
   text: string;
   emotion: EmotionType;
+  messageId?: string;
+}
+
+export interface AssistantDeltaMessage {
+  type: "assistant_delta";
+  text: string;
+  messageId: string;
 }
 
 export interface AudioMessage {
