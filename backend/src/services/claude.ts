@@ -24,22 +24,6 @@ const MAX_TOKENS_DEFAULT = 64;
 const MAX_TOKENS_TOOL = 128;
 const MAX_TOKENS_TOOL_FOLLOWUP = 160;
 
-// Request timeout for better UX (inspired by TEN Framework)
-const REQUEST_TIMEOUT_MS = 8000;
-const RETRY_ATTEMPTS = 1;
-
-/**
- * Wrap a promise with timeout
- */
-function withTimeout<T>(promise: Promise<T>, ms: number, operation: string): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<T>((_, reject) => 
-      setTimeout(() => reject(new Error(`${operation} timed out after ${ms}ms`)), ms)
-    )
-  ]);
-}
-
 // Tool definitions for Claude
 const tools: Anthropic.Tool[] = [
   {
@@ -204,7 +188,6 @@ const SENTENCE_ENDINGS = /([。！？!?.]+)/;
  */
 export function* extractCompleteSentences(buffer: string): Generator<{ sentence: string; remaining: string }> {
   const parts = buffer.split(SENTENCE_ENDINGS);
-  let accumulated = "";
   
   for (let i = 0; i < parts.length - 1; i += 2) {
     const text = parts[i];
@@ -214,6 +197,74 @@ export function* extractCompleteSentences(buffer: string): Generator<{ sentence:
       yield { sentence: sentence.trim(), remaining: parts.slice(i + 2).join("") };
     }
   }
+}
+
+/**
+ * Helper to process stream events and extract text with sentence boundaries
+ * Note: This processes events inline to avoid SDK stream handling issues
+ * 
+ * OPTIMIZATION: The [EMOTION:xxx] tag is stripped before sending to frontend
+ * to save bandwidth. Only clean text is sent via onChunk.
+ */
+interface StreamState {
+  fullText: string;
+  sentenceBuffer: string;
+  detectedEmotion: EmotionType;
+  emotionParsed: boolean;
+  pendingText: string;  // Buffer for text before emotion tag is parsed
+}
+
+function processStreamEvent(
+  delta: string,
+  state: StreamState,
+  onChunk?: (text: string) => void,
+  onSentence?: (sentence: string, emotion: EmotionType) => void
+): void {
+  state.fullText += delta;
+
+  // Parse emotion from beginning of response
+  if (!state.emotionParsed) {
+    state.pendingText += delta;
+    
+    // Check if we have the complete emotion tag
+    if (state.fullText.includes("]")) {
+      const parsed = parseEmotionAndText(state.fullText);
+      state.detectedEmotion = parsed.emotion;
+      state.emotionParsed = true;
+      state.sentenceBuffer = parsed.text;
+      
+      // Send the clean text (without emotion tag) to frontend
+      if (onChunk && parsed.text.length > 0) {
+        onChunk(parsed.text);
+      }
+      state.pendingText = "";
+    }
+    // Don't send anything until emotion tag is complete (saves bandwidth)
+  } else {
+    // Emotion already parsed - send delta directly (it's clean text)
+    if (onChunk) onChunk(delta);
+    state.sentenceBuffer += delta;
+  }
+
+  // Emit complete sentences for parallel TTS
+  if (onSentence && state.emotionParsed) {
+    for (const { sentence, remaining } of extractCompleteSentences(state.sentenceBuffer)) {
+      onSentence(sentence, state.detectedEmotion);
+      state.sentenceBuffer = remaining;
+    }
+  }
+}
+
+function finalizeStream(
+  state: StreamState,
+  onSentence?: (sentence: string, emotion: EmotionType) => void
+): { fullText: string; emotion: EmotionType } {
+  // Emit remaining text as final sentence
+  if (onSentence && state.sentenceBuffer.trim().length > 0) {
+    onSentence(state.sentenceBuffer.trim(), state.detectedEmotion);
+  }
+  const { emotion, text } = parseEmotionAndText(state.fullText);
+  return { fullText: text, emotion };
 }
 
 /**
@@ -253,6 +304,7 @@ export async function chat(
   }
 
   try {
+    // Non-tool streaming path
     if (!useTools && onChunk) {
       const stream = await anthropic.messages.stream({
         model: "claude-3-5-haiku-20241022",
@@ -262,45 +314,22 @@ export async function chat(
         messages,
       });
 
-      let fullText = "";
-      let sentenceBuffer = "";
-      let detectedEmotion: EmotionType = "neutral";
-      let emotionParsed = false;
+      const state: StreamState = {
+        fullText: "",
+        sentenceBuffer: "",
+        detectedEmotion: "neutral",
+        emotionParsed: false,
+        pendingText: "",
+      };
 
       for await (const event of stream) {
         if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
-          const delta = event.delta.text;
-          fullText += delta;
-          onChunk(delta);
-
-          // Parse emotion from beginning of response
-          if (!emotionParsed && fullText.includes("]")) {
-            const parsed = parseEmotionAndText(fullText);
-            detectedEmotion = parsed.emotion;
-            emotionParsed = true;
-            // Start sentence buffer from text after emotion tag
-            sentenceBuffer = parsed.text;
-          } else if (emotionParsed) {
-            sentenceBuffer += delta;
-          }
-
-          // Emit complete sentences for parallel TTS processing
-          if (onSentence && emotionParsed) {
-            for (const { sentence, remaining } of extractCompleteSentences(sentenceBuffer)) {
-              onSentence(sentence, detectedEmotion);
-              sentenceBuffer = remaining;
-            }
-          }
+          processStreamEvent(event.delta.text, state, onChunk, onSentence);
         }
       }
 
-      // Emit any remaining text as final sentence
-      if (onSentence && sentenceBuffer.trim().length > 0) {
-        onSentence(sentenceBuffer.trim(), detectedEmotion);
-      }
-
-      const { emotion, text } = parseEmotionAndText(fullText);
-      const result = { text, emotion, usedTool: false };
+      const { fullText, emotion } = finalizeStream(state, onSentence);
+      const result = { text: fullText, emotion, usedTool: false };
       setCachedResponse(cacheKey, result);
       return result;
     }
@@ -346,44 +375,22 @@ export async function chat(
             ],
           });
 
-          let fullText = "";
-          let sentenceBuffer = "";
-          let detectedEmotion: EmotionType = "neutral";
-          let emotionParsed = false;
+          const state: StreamState = {
+            fullText: "",
+            sentenceBuffer: "",
+            detectedEmotion: "neutral",
+            emotionParsed: false,
+            pendingText: "",
+          };
 
           for await (const event of followUpStream) {
             if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
-              const delta = event.delta.text;
-              fullText += delta;
-              if (onChunk) onChunk(delta);
-
-              // Parse emotion from beginning of response
-              if (!emotionParsed && fullText.includes("]")) {
-                const parsed = parseEmotionAndText(fullText);
-                detectedEmotion = parsed.emotion;
-                emotionParsed = true;
-                sentenceBuffer = parsed.text;
-              } else if (emotionParsed) {
-                sentenceBuffer += delta;
-              }
-
-              // Emit complete sentences for parallel TTS
-              if (onSentence && emotionParsed) {
-                for (const { sentence, remaining } of extractCompleteSentences(sentenceBuffer)) {
-                  onSentence(sentence, detectedEmotion);
-                  sentenceBuffer = remaining;
-                }
-              }
+              processStreamEvent(event.delta.text, state, onChunk, onSentence);
             }
           }
 
-          // Emit remaining text as final sentence
-          if (onSentence && sentenceBuffer.trim().length > 0) {
-            onSentence(sentenceBuffer.trim(), detectedEmotion);
-          }
-
-          const { emotion, text } = parseEmotionAndText(fullText);
-          return { text, emotion, usedTool: true };
+          const { fullText, emotion } = finalizeStream(state, onSentence);
+          return { text: fullText, emotion, usedTool: true };
         }
 
         // Non-streaming fallback

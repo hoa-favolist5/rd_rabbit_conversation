@@ -1,6 +1,6 @@
 import { WebSocket } from "ws";
 import { v4 as uuidv4 } from "uuid";
-import { chat, needsMovieSearch, extractCompleteSentences } from "../services/claude.js";
+import { chat, needsMovieSearch } from "../services/claude.js";
 import { synthesizeSpeechBase64 } from "../services/azure-tts.js";
 import { searchMovies } from "../db/movies.js";
 import { startTimer } from "../utils/timer.js";
@@ -432,38 +432,44 @@ async function processUserInput(session: Session, userText: string): Promise<voi
     let audioSent = false;
     
     if (ENABLE_PARALLEL_TTS && ttsQueue.length > 0) {
-      // Process parallel TTS results as they complete
-      console.log(`\n🔊 [${session.id.slice(0, 8)}] Processing ${ttsQueue.length} parallel TTS chunks...`);
-      console.log(`${"─".repeat(80)}`);
+      // Process TTS chunks - send immediately as each completes (true parallel)
+      console.log(`\n🔊 [${session.id.slice(0, 8)}] Sending ${ttsQueue.length} TTS chunks as they complete...`);
       
+      const totalChunks = ttsQueue.length;
       const chunkResults: TTSChunkResult[] = [];
-      let totalTTSTime = 0;
-      let totalChars = 0;
-      let totalAudioKB = 0;
+      let sentCount = 0;
       
-      for (let i = 0; i < ttsQueue.length; i++) {
-        const result = await ttsQueue[i];
+      // Process all chunks in parallel and send each as it completes
+      const sendPromises = ttsQueue.map(async (promise, i) => {
+        const result = await promise;
         if (result) {
-          chunkResults.push(result);
-          totalTTSTime += result.durationMs;
-          totalChars += result.charCount;
-          const audioKB = Math.round(result.audio.length * 0.75 / 1024);
-          totalAudioKB += audioKB;
-          
-          // Send audio chunk with index for ordered playback on client
+          // Send immediately when this chunk is ready (don't wait for earlier chunks)
           send(ws, {
             type: "audio_chunk",
             data: result.audio,
             format: "mp3",
-            index: i,
-            total: ttsQueue.length,
-            isLast: i === ttsQueue.length - 1,
+            index: result.index,
+            total: totalChunks,
+            isLast: result.index === totalChunks - 1,
           });
-          audioSent = true;
+          sentCount++;
+          chunkResults.push(result);
+          return result;
         }
-      }
+        return null;
+      });
       
-      // Log detailed TTS summary
+      // Wait for all to complete (but they've already been sent as they finished)
+      await Promise.all(sendPromises);
+      audioSent = sentCount > 0;
+      
+      // Calculate totals for logging
+      const totalTTSTime = chunkResults.reduce((sum, c) => sum + c.durationMs, 0);
+      const totalChars = chunkResults.reduce((sum, c) => sum + c.charCount, 0);
+      const totalAudioKB = chunkResults.reduce((sum, c) => sum + Math.round(c.audio.length * 0.75 / 1024), 0);
+      
+      // Log detailed TTS summary (sorted by index)
+      chunkResults.sort((a, b) => a.index - b.index);
       console.log(`\n📊 TTS Chunk Summary (${session.id.slice(0, 8)}):`);
       console.log(`${"─".repeat(80)}`);
       console.log(`| ${"#".padEnd(3)} | ${"Time".padEnd(8)} | ${"Chars".padEnd(6)} | ${"Content".padEnd(50)} |`);
@@ -482,7 +488,7 @@ async function processUserInput(session: Session, userText: string): Promise<voi
       
       workflow.endStep({ 
         mode: "parallel", 
-        chunks: ttsQueue.length,
+        chunks: totalChunks,
         totalTTSTime,
         textLength: response.text.length 
       });
