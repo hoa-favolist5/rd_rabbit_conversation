@@ -214,6 +214,9 @@ interface StreamState {
   pendingText: string;  // Buffer for text before emotion tag is parsed
 }
 
+// Max chars to wait for emotion tag before assuming it's missing
+const EMOTION_TAG_MAX_WAIT = 40;
+
 function processStreamEvent(
   delta: string,
   state: StreamState,
@@ -236,6 +239,21 @@ function processStreamEvent(
       // Send the clean text (without emotion tag) to frontend
       if (onChunk && parsed.text.length > 0) {
         onChunk(parsed.text);
+      }
+      state.pendingText = "";
+    } 
+    // FALLBACK: If we've received enough text without finding emotion tag,
+    // assume there's no tag and start streaming immediately
+    else if (state.pendingText.length > EMOTION_TAG_MAX_WAIT || 
+             !state.fullText.startsWith("[")) {
+      console.log("⚠️ No emotion tag detected, using fallback (neutral)");
+      state.detectedEmotion = "neutral";
+      state.emotionParsed = true;
+      state.sentenceBuffer = state.pendingText;
+      
+      // Send all buffered text to frontend
+      if (onChunk && state.pendingText.length > 0) {
+        onChunk(state.pendingText);
       }
       state.pendingText = "";
     }

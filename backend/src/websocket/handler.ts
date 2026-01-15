@@ -15,9 +15,11 @@ import type {
   WSMessage,
 } from "../types/index.js";
 
-// Configuration for parallel TTS streaming
+// Configuration for parallel TTS streaming (TEN Framework inspired)
 const ENABLE_PARALLEL_TTS = true;
 const MIN_SENTENCE_LENGTH_FOR_TTS = 5;
+const MAX_CONCURRENT_TTS = 3;  // Limit concurrent TTS to avoid rate limiting
+const SHORT_RESPONSE_THRESHOLD = 30;  // Skip chunking for very short responses
 
 // Workflow step definitions matching WORKFLOW.md
 type WorkflowStep = 
@@ -49,10 +51,32 @@ interface Session {
   ws: WebSocket;
   history: ConversationTurn[];
   status: ConversationStatus;
+  pendingRequest: boolean;  // Prevent duplicate requests
 }
 
 // Active sessions
 const sessions = new Map<string, Session>();
+
+// TTS concurrency limiter (TEN Framework pattern)
+let activeTTSCount = 0;
+const ttsWaitQueue: Array<() => void> = [];
+
+async function withTTSLimit<T>(fn: () => Promise<T>): Promise<T> {
+  // Wait if at concurrency limit
+  if (activeTTSCount >= MAX_CONCURRENT_TTS) {
+    await new Promise<void>(resolve => ttsWaitQueue.push(resolve));
+  }
+  
+  activeTTSCount++;
+  try {
+    return await fn();
+  } finally {
+    activeTTSCount--;
+    // Wake up next waiting request
+    const next = ttsWaitQueue.shift();
+    if (next) next();
+  }
+}
 
 // Step labels
 const STEP_LABELS: Record<WorkflowStep, { name: string; nameJa: string }> = {
@@ -301,6 +325,14 @@ function sendWorkflowTiming(
  */
 async function processUserInput(session: Session, userText: string): Promise<void> {
   const { ws, history } = session;
+  
+  // Request deduplication: prevent duplicate requests while one is in flight
+  if (session.pendingRequest) {
+    console.log(`⚠️ [${session.id.slice(0, 8)}] Ignoring duplicate request (previous still processing)`);
+    return;
+  }
+  session.pendingRequest = true;
+  
   const workflow = new WorkflowTimer(session.id);
 
   try {
@@ -379,10 +411,13 @@ async function processUserInput(session: Session, userText: string): Promise<voi
           
           console.log(`🎙️ [${session.id.slice(0, 8)}] TTS Chunk #${idx} START: "${sentence}" (${charCount} chars)`);
           
-          const ttsPromise = synthesizeSpeechBase64(sentence, {
-            emotion,
-            voice: "female",
-          }).then(audio => {
+          // Use TTS concurrency limiter to avoid rate limiting
+          const ttsPromise = withTTSLimit(() => 
+            synthesizeSpeechBase64(sentence, {
+              emotion,
+              voice: "female",
+            })
+          ).then(audio => {
             const durationMs = Math.round(performance.now() - startTime);
             const audioSizeKB = Math.round(audio.length * 0.75 / 1024); // base64 to KB
             console.log(`✅ [${session.id.slice(0, 8)}] TTS Chunk #${idx} DONE: ${durationMs}ms | ${charCount} chars | ${audioSizeKB}KB audio`);
@@ -431,7 +466,12 @@ async function processUserInput(session: Session, userText: string): Promise<voi
     
     let audioSent = false;
     
-    if (ENABLE_PARALLEL_TTS && ttsQueue.length > 0) {
+    // Short response optimization: skip chunking for very brief responses
+    const useParallelTTS = ENABLE_PARALLEL_TTS && 
+                           ttsQueue.length > 0 && 
+                           response.text.length >= SHORT_RESPONSE_THRESHOLD;
+    
+    if (useParallelTTS) {
       // Process TTS chunks - send immediately as each completes (true parallel)
       console.log(`\n🔊 [${session.id.slice(0, 8)}] Sending ${ttsQueue.length} TTS chunks as they complete...`);
       
@@ -562,6 +602,9 @@ async function processUserInput(session: Session, userText: string): Promise<voi
     session.status = "idle";
     sendStatus(ws, "idle", "confused", "");
     sendError(ws, "エラーが発生しました。もう一度お試しください。");
+  } finally {
+    // Always reset pending flag
+    session.pendingRequest = false;
   }
 }
 
@@ -618,6 +661,7 @@ export function handleConnection(ws: WebSocket): void {
     ws,
     history: [],
     status: "idle",
+    pendingRequest: false,
   };
 
   sessions.set(sessionId, session);
