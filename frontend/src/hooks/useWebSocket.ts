@@ -45,6 +45,7 @@ interface UseWebSocketOptions {
   url: string;
   onAudio?: (audioData: string, format: string) => void;
   onAudioChunk?: (chunk: AudioChunk) => void;
+  onWaiting?: (index: number) => void;  // Play waiting audio before DB search
 }
 
 interface UseWebSocketReturn {
@@ -65,6 +66,7 @@ export function useWebSocket({
   url,
   onAudio,
   onAudioChunk,
+  onWaiting,
 }: UseWebSocketOptions): UseWebSocketReturn {
   const [isConnected, setIsConnected] = useState(false);
   const [status, setStatus] = useState<ConversationStatus>("idle");
@@ -262,6 +264,12 @@ export function useWebSocket({
           });
           break;
 
+        case "waiting":
+          // Play pre-recorded waiting audio before DB search
+          console.log(`⏳ Waiting signal received: #${message.index}`);
+          onWaiting?.(message.index as number);
+          break;
+
         case "error":
           setError(message.message as string);
           break;
@@ -315,7 +323,7 @@ export function useWebSocket({
           console.log("Unknown message type:", message.type);
       }
     },
-    [generateId, onAudio, onAudioChunk]
+    [generateId, onAudio, onAudioChunk, onWaiting]
   );
 
   // Send message to server

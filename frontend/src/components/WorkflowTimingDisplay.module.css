@@ -1,129 +1,62 @@
 .container {
-  background: linear-gradient(180deg, #1a1a2e 0%, #16213e 100%);
+  background: linear-gradient(180deg, rgba(26, 26, 46, 0.95) 0%, rgba(22, 33, 62, 0.95) 100%);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 16px;
   padding: 16px;
-  font-size: 12px;
-  min-width: 320px;
-  max-width: 400px;
-  box-shadow: 
-    0 4px 24px rgba(0, 0, 0, 0.3),
-    0 0 0 1px rgba(255, 255, 255, 0.03) inset;
+  min-width: 300px;
+  max-width: 340px;
+  backdrop-filter: blur(8px);
 }
 
-/* Header */
-.header {
+/* Key Metrics */
+.metrics {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  gap: 8px;
   margin-bottom: 16px;
   padding-bottom: 12px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 
-.headerLeft {
+.metric {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex: 1;
 }
 
-.icon {
+.metricIcon {
   font-size: 16px;
 }
 
-.title {
-  font-weight: 600;
-  color: #f1f5f9;
-  font-size: 14px;
-}
-
-.headerRight {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.totalLabel {
-  color: #64748b;
-  font-size: 12px;
-}
-
-.totalValue {
-  font-weight: 700;
-  font-size: 16px;
-  color: #f1f5f9;
-}
-
-.ttfrLabel {
-  color: #fbbf24;
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.ttfrValue {
-  font-weight: 700;
-  font-size: 16px;
-  color: #fbbf24;
-}
-
-.separator {
-  color: #475569;
-  font-size: 14px;
-}
-
-/* TTFR Highlight Box */
-.ttfrBox {
-  display: flex;
-  justify-content: space-around;
-  gap: 8px;
-  padding: 12px;
-  background: linear-gradient(135deg, rgba(251, 191, 36, 0.15) 0%, rgba(245, 158, 11, 0.1) 100%);
-  border-radius: 12px;
-  margin-bottom: 16px;
-  border: 1px solid rgba(251, 191, 36, 0.3);
-}
-
-.ttfrMetric {
+.metricContent {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  min-width: 80px;
+  gap: 2px;
 }
 
-.ttfrIcon {
-  font-size: 18px;
-}
-
-.ttfrMetricLabel {
+.metricLabel {
   font-size: 10px;
-  color: #fbbf24;
-  font-weight: 500;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
-.ttfrMetricValue {
-  font-size: 18px;
+.metricValue {
+  font-size: 14px;
   font-weight: 700;
-  color: #fbbf24;
+  font-family: "SF Mono", Monaco, monospace;
 }
 
 /* Timeline */
 .timeline {
-  margin-bottom: 16px;
-}
-
-.timelineHeader {
-  display: flex;
-  justify-content: space-between;
-  font-size: 10px;
-  color: #64748b;
-  margin-bottom: 4px;
+  margin-bottom: 14px;
 }
 
 .timelineTrack {
-  height: 12px;
+  height: 8px;
   background: rgba(255, 255, 255, 0.05);
-  border-radius: 6px;
+  border-radius: 4px;
   position: relative;
   overflow: hidden;
 }
@@ -132,16 +65,13 @@
   position: absolute;
   top: 0;
   height: 100%;
-  min-width: 2px;
-  transition: all 0.3s ease;
+  min-width: 3px;
+  border-radius: 2px;
+  transition: opacity 0.2s;
 }
 
-.timelineBar:first-child {
-  border-radius: 6px 0 0 6px;
-}
-
-.timelineBar:last-child {
-  border-radius: 0 6px 6px 0;
+.timelineBar:hover {
+  opacity: 0.8;
 }
 
 /* Steps */
@@ -149,172 +79,69 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
-  margin-bottom: 12px;
 }
 
 .step {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  gap: 12px;
-}
-
-.stepLeft {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-shrink: 0;
-  min-width: 140px;
-}
-
-.stepNumber {
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.08);
-  color: #94a3b8;
-  font-size: 10px;
-  font-weight: 600;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  gap: 8px;
 }
 
 .stepIcon {
   font-size: 12px;
+  width: 18px;
+  text-align: center;
+  flex-shrink: 0;
 }
 
 .stepName {
   font-size: 11px;
-  color: #e2e8f0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 80px;
-}
-
-.stepCategory {
-  font-size: 9px;
-  padding: 2px 6px;
-  border-radius: 10px;
-  color: white;
-  font-weight: 500;
-}
-
-.stepRight {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: 1;
-}
-
-.stepBarContainer {
-  flex: 1;
-  height: 6px;
-  background: rgba(255, 255, 255, 0.05);
-  border-radius: 3px;
-  overflow: hidden;
-  min-width: 60px;
+  color: #94a3b8;
+  min-width: 100px;
+  flex-shrink: 0;
 }
 
 .stepBar {
+  flex: 1;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.stepBarFill {
   height: 100%;
-  border-radius: 3px;
+  border-radius: 2px;
   transition: width 0.3s ease;
 }
 
-.stepDuration {
-  font-weight: 600;
+.stepTime {
   font-size: 11px;
+  font-weight: 600;
+  font-family: "SF Mono", Monaco, monospace;
   min-width: 50px;
-  text-align: right;
-  color: #e2e8f0;
-}
-
-.stepPercent {
-  font-size: 10px;
-  color: #64748b;
-  min-width: 35px;
   text-align: right;
 }
 
 /* Tool Info */
-.toolInfoUsed {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  background: rgba(251, 191, 36, 0.1);
-  border: 1px solid rgba(251, 191, 36, 0.2);
-  border-radius: 10px;
-  margin-bottom: 12px;
-}
-
-.toolInfoFast {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  background: rgba(52, 211, 153, 0.1);
-  border: 1px solid rgba(52, 211, 153, 0.2);
-  border-radius: 10px;
-  margin-bottom: 12px;
-}
-
-.toolIcon {
-  font-size: 14px;
-}
-
-.toolLabel {
-  font-size: 11px;
-  color: #e2e8f0;
-  flex: 1;
-}
-
-.dbValue {
-  font-weight: 600;
-  font-size: 12px;
-  color: #f1f5f9;
-}
-
-/* Summary */
-.summary {
-  display: flex;
-  justify-content: space-between;
+.toolInfo {
+  margin-top: 12px;
   padding-top: 12px;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
-}
-
-.summaryItem {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-}
-
-.summaryLabel {
-  font-size: 10px;
-  color: #64748b;
-}
-
-.summaryValue {
   font-size: 11px;
-  font-weight: 600;
-  color: #e2e8f0;
+  color: #64748b;
+  text-align: center;
 }
 
 /* Responsive */
 @media (max-width: 400px) {
   .container {
-    min-width: 280px;
+    min-width: 260px;
     padding: 12px;
   }
-  
+
   .stepName {
-    max-width: 60px;
-  }
-  
-  .stepCategory {
-    display: none;
+    min-width: 80px;
+    font-size: 10px;
   }
 }

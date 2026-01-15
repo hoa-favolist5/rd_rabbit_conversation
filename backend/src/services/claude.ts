@@ -294,7 +294,8 @@ export async function chat(
   userMessage: string,
   onMovieSearch?: (query: string, genre?: string, year?: number) => Promise<MovieSearchResult>,
   onChunk?: (text: string) => void,
-  onSentence?: (sentence: string, emotion: EmotionType) => void
+  onSentence?: (sentence: string, emotion: EmotionType) => void,
+  onToolUse?: () => void  // Called when tool_use is detected (before DB search)
 ): Promise<ChatResponse> {
   const messages = [
     ...toClaudeMessages(history),
@@ -367,6 +368,11 @@ export async function chat(
       );
 
       if (toolUseBlock && toolUseBlock.name === "search_movies" && onMovieSearch) {
+        // Notify that tool use is starting (for waiting signal)
+        if (onToolUse) {
+          onToolUse();
+        }
+        
         const input = toolUseBlock.input as { query: string; genre?: string; year?: number };
         const movieResults = await onMovieSearch(input.query, input.genre, input.year);
 

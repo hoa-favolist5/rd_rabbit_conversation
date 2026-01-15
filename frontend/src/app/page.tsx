@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useMemo } from "react";
+import React, { useCallback, useMemo, useRef } from "react";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useAudioPlayer } from "@/hooks/useAudioPlayer";
 import { RabbitAvatar, ChatHistory, ChatInput, WorkflowTimingDisplay } from "@/components";
@@ -12,6 +12,7 @@ const WS_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:3001/ws";
 
 export default function Home() {
   const audioPlayer = useAudioPlayer();
+  const waitingAudioRef = useRef<HTMLAudioElement | null>(null);
 
   // Handle full audio from WebSocket (fallback mode)
   const handleAudio = useCallback(
@@ -29,6 +30,23 @@ export default function Home() {
     [audioPlayer]
   );
 
+  // Handle waiting signal - play pre-recorded waiting audio
+  const handleWaiting = useCallback((index: number) => {
+    // Stop any currently playing waiting audio
+    if (waitingAudioRef.current) {
+      waitingAudioRef.current.pause();
+      waitingAudioRef.current = null;
+    }
+
+    // Play waiting audio from public/waiting/{index}.mp3
+    const audio = new Audio(`/waiting/${index}.mp3`);
+    waitingAudioRef.current = audio;
+    
+    audio.play().catch((err) => {
+      console.warn(`Failed to play waiting audio #${index}:`, err);
+    });
+  }, []);
+
   const {
     isConnected,
     status: wsStatus,
@@ -42,6 +60,7 @@ export default function Home() {
     url: WS_URL,
     onAudio: handleAudio,
     onAudioChunk: handleAudioChunk,
+    onWaiting: handleWaiting,
   });
 
   // Derive actual status: override to "speaking" when audio is playing

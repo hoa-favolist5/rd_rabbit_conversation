@@ -21,6 +21,30 @@ const MIN_SENTENCE_LENGTH_FOR_TTS = 5;
 const MAX_CONCURRENT_TTS = 3;  // Limit concurrent TTS to avoid rate limiting
 const SHORT_RESPONSE_THRESHOLD = 30;  // Skip chunking for very short responses
 
+// Waiting phrases - played before database search (pre-recorded audio)
+const WAITING_PHRASES = [
+  "もちろん。急いで確認するから、待っててね。",
+  "了解。ちょっと待ってね。",
+  "うん、わかった。今確認するから待っててね。",
+  "なるほど。少し調べてみるから待ってて。",
+  "OK。内容を確認するから、少々お待ちを。",
+  "任せて。丁寧にお調べするから、少し待っててね。",
+  "承知したよ。ちょっと考えるから待っててくれる？",
+  "あ、そのことだね。今調べてあげるから待って。",
+  "確かに。すぐ確認するから、ちょっと待ってて。",
+  "いいよ。調べてみるから、そこで待っててね。",
+  "うん、わかるよ。すぐに調べてみるね。",
+  "おっけー。情報を探してくるから、待っててね。",
+  "了解了解。落ち着いて調べるから、待っててね。",
+  "そうだね。すぐ確認するから、ちょっと待って。",
+  "お安い御用だよ。今すぐ調べるから待っててね。",
+  "オッケー。しっかり探してみるから、待ってて。",
+  "そうだよね。今、詳しく確認するからちょっと待って。",
+  "おっけー。すぐ準備するから、ちょっと待っててね。",
+  "教えてくれてありがとう。今すぐ調べるから待ってて。",
+  "了解したよ。すぐに見つけてくるから、待っててね。",
+];
+
 // Workflow step definitions matching WORKFLOW.md
 type WorkflowStep = 
   | "STEP1_TEXT_INPUT"
@@ -83,7 +107,7 @@ const STEP_LABELS: Record<WorkflowStep, { name: string; nameJa: string }> = {
   STEP1_TEXT_INPUT: { name: "Text Input", nameJa: "テキスト入力" },
   STEP2_WEBSOCKET_SEND: { name: "WebSocket Send", nameJa: "WebSocket送信" },
   STEP3_BACKEND_START: { name: "Backend Start", nameJa: "Backend処理開始" },
-  STEP4_LLM_REQUEST: { name: "LLM Request", nameJa: "Claude API呼び出し" },
+  STEP4_LLM_REQUEST: { name: "LLM Request", nameJa: "LLM 呼び出し" },
   STEP5_DB_SEARCH: { name: "DB Search", nameJa: "データベース検索" },
   STEP6_LLM_RESPONSE: { name: "LLM Response", nameJa: "Claude最終レスポンス" },
   STEP7_TEXT_RESPONSE: { name: "Text Response", nameJa: "テキスト応答送信" },
@@ -296,6 +320,20 @@ function sendError(ws: WebSocket, errorMessage: string): void {
 }
 
 /**
+ * Send waiting signal to client (before DB search)
+ * Frontend plays pre-recorded audio from public/waiting/{index}.mp3
+ */
+function sendWaiting(ws: WebSocket): void {
+  const index = Math.floor(Math.random() * WAITING_PHRASES.length);
+  console.log(`⏳ Sending waiting signal #${index}: "${WAITING_PHRASES[index]}"`);
+  send(ws, {
+    type: "waiting",
+    index,
+    text: WAITING_PHRASES[index],  // For debugging/fallback
+  });
+}
+
+/**
  * Send workflow timing information to client
  */
 function sendWorkflowTiming(
@@ -430,7 +468,11 @@ async function processUserInput(session: Session, userText: string): Promise<voi
           
           ttsQueue.push(ttsPromise);
         }
-      } : undefined
+      } : undefined,
+      // onToolUse callback - send waiting signal before DB search
+      () => {
+        sendWaiting(ws);
+      }
     );
 
     workflow.endStep({

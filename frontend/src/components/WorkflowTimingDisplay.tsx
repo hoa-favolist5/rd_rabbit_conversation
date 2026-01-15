@@ -16,7 +16,6 @@ interface WorkflowTiming {
   dbSearchTime: number;
   usedTool: boolean;
   totalMs: number;
-  // Frontend-measured timings (actual perceived latency)
   timeToFirstResponse?: number;
   timeToFirstAudio?: number;
 }
@@ -25,52 +24,42 @@ interface WorkflowTimingDisplayProps {
   timing: WorkflowTiming | null;
 }
 
-// Step icons based on workflow
+// Step icons
 const STEP_ICONS: Record<string, string> = {
-  STEP1_TEXT_INPUT: "⌨️",
   STEP2_WEBSOCKET_SEND: "📡",
   STEP3_BACKEND_START: "⚡",
   STEP4_LLM_REQUEST: "🤖",
-  STEP5_DB_SEARCH: "🔍",
-  STEP6_LLM_RESPONSE: "💬",
   STEP7_TEXT_RESPONSE: "📝",
   STEP8_TTS_SYNTHESIS: "🔊",
   STEP9_AUDIO_SEND: "📤",
-  STEP10_AUDIO_PLAY: "▶️",
   STEP11_TIMING_SEND: "⏱️",
   STEP12_COMPLETE: "✅",
 };
 
-// Step categories for grouping
-const STEP_CATEGORIES: Record<string, { color: string; label: string }> = {
-  STEP2_WEBSOCKET_SEND: { color: "#6366f1", label: "通信" },
-  STEP3_BACKEND_START: { color: "#8b5cf6", label: "処理" },
-  STEP4_LLM_REQUEST: { color: "#ec4899", label: "AI" },
-  STEP7_TEXT_RESPONSE: { color: "#14b8a6", label: "応答" },
-  STEP8_TTS_SYNTHESIS: { color: "#f59e0b", label: "音声" },
-  STEP9_AUDIO_SEND: { color: "#10b981", label: "送信" },
-  STEP11_TIMING_SEND: { color: "#6b7280", label: "計測" },
-  STEP12_COMPLETE: { color: "#22c55e", label: "完了" },
+// Step colors
+const STEP_COLORS: Record<string, string> = {
+  STEP2_WEBSOCKET_SEND: "#6366f1",
+  STEP3_BACKEND_START: "#8b5cf6",
+  STEP4_LLM_REQUEST: "#ec4899",
+  STEP7_TEXT_RESPONSE: "#14b8a6",
+  STEP8_TTS_SYNTHESIS: "#f59e0b",
+  STEP9_AUDIO_SEND: "#10b981",
+  STEP11_TIMING_SEND: "#64748b",
+  STEP12_COMPLETE: "#22c55e",
 };
 
 function getTimingColor(ms: number): string {
-  if (ms < 50) return "#10b981"; // green - very fast
-  if (ms < 200) return "#22c55e"; // light green - fast
-  if (ms < 500) return "#84cc16"; // lime - good
-  if (ms < 1000) return "#f59e0b"; // yellow - medium
-  if (ms < 2000) return "#f97316"; // orange - slow
-  return "#ef4444"; // red - very slow
+  if (ms < 100) return "#10b981";
+  if (ms < 300) return "#22c55e";
+  if (ms < 800) return "#f59e0b";
+  if (ms < 1500) return "#f97316";
+  return "#ef4444";
 }
 
 function formatDuration(ms: number): string {
   if (ms < 1) return "<1ms";
-  if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(2)}s`;
-}
-
-function getStepNumber(step: string): string {
-  const match = step.match(/STEP(\d+)/);
-  return match ? match[1] : "?";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
 }
 
 export function WorkflowTimingDisplay({ timing }: WorkflowTimingDisplayProps) {
@@ -78,7 +67,7 @@ export function WorkflowTimingDisplay({ timing }: WorkflowTimingDisplayProps) {
     return null;
   }
 
-  // Calculate cumulative time for waterfall chart
+  // Calculate cumulative time for waterfall
   let cumulativeTime = 0;
   const stepsWithCumulative = timing.steps.map((step) => {
     const startPercent = (cumulativeTime / timing.totalMs) * 100;
@@ -87,81 +76,58 @@ export function WorkflowTimingDisplay({ timing }: WorkflowTimingDisplayProps) {
     return { ...step, startPercent, widthPercent };
   });
 
+  const hasMetrics = timing.timeToFirstResponse !== undefined || timing.timeToFirstAudio !== undefined;
+
   return (
     <div className={styles.container}>
-      {/* Header with TTFR (Time to First Response) - the key metric */}
-      <div className={styles.header}>
-        <div className={styles.headerLeft}>
-          <span className={styles.icon}>📊</span>
-          <span className={styles.title}>Workflow Performance</span>
-        </div>
-        <div className={styles.headerRight}>
+      {/* Key Metrics */}
+      {hasMetrics && (
+        <div className={styles.metrics}>
           {timing.timeToFirstResponse !== undefined && (
-            <>
-              <span className={styles.ttfrLabel}>⚡ TTFR:</span>
-              <span
-                className={styles.ttfrValue}
-                style={{ color: getTimingColor(timing.timeToFirstResponse) }}
-                title="Time to First Response - actual perceived latency"
-              >
-                {formatDuration(timing.timeToFirstResponse)}
-              </span>
-              <span className={styles.separator}>|</span>
-            </>
+            <div className={styles.metric}>
+              <span className={styles.metricIcon}>⚡</span>
+              <div className={styles.metricContent}>
+                <span className={styles.metricLabel}>TTFR</span>
+                <span 
+                  className={styles.metricValue}
+                  style={{ color: getTimingColor(timing.timeToFirstResponse) }}
+                >
+                  {formatDuration(timing.timeToFirstResponse)}
+                </span>
+              </div>
+            </div>
           )}
-          <span className={styles.totalLabel}>Total:</span>
-          <span
-            className={styles.totalValue}
-            style={{ color: getTimingColor(timing.totalMs) }}
-          >
-            {formatDuration(timing.totalMs)}
-          </span>
-        </div>
-      </div>
-      
-      {/* TTFR Highlight Box */}
-      {(timing.timeToFirstResponse !== undefined || timing.timeToFirstAudio !== undefined) && (
-        <div className={styles.ttfrBox}>
-          <div className={styles.ttfrMetric}>
-            <span className={styles.ttfrIcon}>⚡</span>
-            <span className={styles.ttfrMetricLabel}>初回応答</span>
-            <span 
-              className={styles.ttfrMetricValue}
-              style={{ color: timing.timeToFirstResponse ? getTimingColor(timing.timeToFirstResponse) : "#6b7280" }}
-            >
-              {timing.timeToFirstResponse !== undefined ? formatDuration(timing.timeToFirstResponse) : "N/A"}
-            </span>
-          </div>
-          <div className={styles.ttfrMetric}>
-            <span className={styles.ttfrIcon}>🔊</span>
-            <span className={styles.ttfrMetricLabel}>初回音声</span>
-            <span 
-              className={styles.ttfrMetricValue}
-              style={{ color: timing.timeToFirstAudio ? getTimingColor(timing.timeToFirstAudio) : "#6b7280" }}
-            >
-              {timing.timeToFirstAudio !== undefined ? formatDuration(timing.timeToFirstAudio) : "N/A"}
-            </span>
-          </div>
-          <div className={styles.ttfrMetric}>
-            <span className={styles.ttfrIcon}>🏁</span>
-            <span className={styles.ttfrMetricLabel}>完了時間</span>
-            <span 
-              className={styles.ttfrMetricValue}
-              style={{ color: getTimingColor(timing.totalMs) }}
-            >
-              {formatDuration(timing.totalMs)}
-            </span>
+          {timing.timeToFirstAudio !== undefined && (
+            <div className={styles.metric}>
+              <span className={styles.metricIcon}>🔊</span>
+              <div className={styles.metricContent}>
+                <span className={styles.metricLabel}>TTFA</span>
+                <span 
+                  className={styles.metricValue}
+                  style={{ color: getTimingColor(timing.timeToFirstAudio) }}
+                >
+                  {formatDuration(timing.timeToFirstAudio)}
+                </span>
+              </div>
+            </div>
+          )}
+          <div className={styles.metric}>
+            <span className={styles.metricIcon}>🏁</span>
+            <div className={styles.metricContent}>
+              <span className={styles.metricLabel}>Total</span>
+              <span 
+                className={styles.metricValue}
+                style={{ color: getTimingColor(timing.totalMs) }}
+              >
+                {formatDuration(timing.totalMs)}
+              </span>
+            </div>
           </div>
         </div>
       )}
 
-      {/* Waterfall Timeline */}
+      {/* Timeline */}
       <div className={styles.timeline}>
-        <div className={styles.timelineHeader}>
-          <span>0ms</span>
-          <span>{formatDuration(timing.totalMs / 2)}</span>
-          <span>{formatDuration(timing.totalMs)}</span>
-        </div>
         <div className={styles.timelineTrack}>
           {stepsWithCumulative.map((step, index) => (
             <div
@@ -169,8 +135,8 @@ export function WorkflowTimingDisplay({ timing }: WorkflowTimingDisplayProps) {
               className={styles.timelineBar}
               style={{
                 left: `${step.startPercent}%`,
-                width: `${Math.max(step.widthPercent, 1)}%`,
-                backgroundColor: STEP_CATEGORIES[step.step]?.color || getTimingColor(step.durationMs),
+                width: `${Math.max(step.widthPercent, 2)}%`,
+                backgroundColor: STEP_COLORS[step.step] || getTimingColor(step.durationMs),
               }}
               title={`${step.nameJa}: ${formatDuration(step.durationMs)}`}
             />
@@ -178,94 +144,41 @@ export function WorkflowTimingDisplay({ timing }: WorkflowTimingDisplayProps) {
         </div>
       </div>
 
-      {/* Step Details */}
+      {/* Steps */}
       <div className={styles.steps}>
         {timing.steps.map((step, index) => {
-          const percentage =
-            timing.totalMs > 0
-              ? ((step.durationMs / timing.totalMs) * 100).toFixed(1)
-              : "0";
-          const category = STEP_CATEGORIES[step.step];
+          const percentage = timing.totalMs > 0
+            ? ((step.durationMs / timing.totalMs) * 100).toFixed(0)
+            : "0";
+          const color = STEP_COLORS[step.step] || getTimingColor(step.durationMs);
 
           return (
             <div key={index} className={styles.step}>
-              <div className={styles.stepLeft}>
-                <span className={styles.stepNumber}>
-                  {getStepNumber(step.step)}
-                </span>
-                <span className={styles.stepIcon}>
-                  {STEP_ICONS[step.step] || "•"}
-                </span>
-                <span className={styles.stepName}>{step.nameJa}</span>
-                {category && (
-                  <span
-                    className={styles.stepCategory}
-                    style={{ backgroundColor: category.color }}
-                  >
-                    {category.label}
-                  </span>
-                )}
+              <span className={styles.stepIcon}>{STEP_ICONS[step.step] || "•"}</span>
+              <span className={styles.stepName}>{step.nameJa}</span>
+              <div className={styles.stepBar}>
+                <div
+                  className={styles.stepBarFill}
+                  style={{
+                    width: `${Math.min(parseFloat(percentage), 100)}%`,
+                    backgroundColor: color,
+                  }}
+                />
               </div>
-              <div className={styles.stepRight}>
-                <div className={styles.stepBarContainer}>
-                  <div
-                    className={styles.stepBar}
-                    style={{
-                      width: `${Math.min(parseFloat(percentage), 100)}%`,
-                      backgroundColor: getTimingColor(step.durationMs),
-                    }}
-                  />
-                </div>
-                <span
-                  className={styles.stepDuration}
-                  style={{ color: getTimingColor(step.durationMs) }}
-                >
-                  {formatDuration(step.durationMs)}
-                </span>
-                <span className={styles.stepPercent}>{percentage}%</span>
-              </div>
+              <span className={styles.stepTime} style={{ color }}>
+                {formatDuration(step.durationMs)}
+              </span>
             </div>
           );
         })}
       </div>
 
-      {/* Tool Usage Info */}
-      <div className={timing.usedTool ? styles.toolInfoUsed : styles.toolInfoFast}>
-        <span className={styles.toolIcon}>{timing.usedTool ? "🔧" : "⚡"}</span>
-        <span className={styles.toolLabel}>
-          {timing.usedTool ? "Tool使用 (2 API calls)" : "Tool未使用 (1 API call)"}
-        </span>
-        {timing.hasDbSearch && (
-          <span
-            className={styles.dbValue}
-            style={{ color: getTimingColor(timing.dbSearchTime) }}
-          >
-            DB: {formatDuration(timing.dbSearchTime)}
-          </span>
-        )}
-      </div>
-
-      {/* Performance Summary */}
-      <div className={styles.summary}>
-        <div className={styles.summaryItem}>
-          <span className={styles.summaryLabel}>ステップ数</span>
-          <span className={styles.summaryValue}>{timing.steps.length}</span>
+      {/* Tool Info */}
+      {timing.usedTool && timing.hasDbSearch && (
+        <div className={styles.toolInfo}>
+          <span>🔍 DB検索: {formatDuration(timing.dbSearchTime)}</span>
         </div>
-        <div className={styles.summaryItem}>
-          <span className={styles.summaryLabel}>平均/ステップ</span>
-          <span className={styles.summaryValue}>
-            {formatDuration(Math.round(timing.totalMs / timing.steps.length))}
-          </span>
-        </div>
-        <div className={styles.summaryItem}>
-          <span className={styles.summaryLabel}>最長ステップ</span>
-          <span className={styles.summaryValue}>
-            {timing.steps.reduce((max, s) => 
-              s.durationMs > max.durationMs ? s : max
-            ).nameJa}
-          </span>
-        </div>
-      </div>
+      )}
     </div>
   );
 }
