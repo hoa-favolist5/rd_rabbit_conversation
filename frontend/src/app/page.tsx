@@ -12,10 +12,18 @@ const WS_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:3001/ws";
 export default function Home() {
   const audioPlayer = useAudioPlayer();
 
-  // Handle audio from WebSocket
+  // Handle full audio from WebSocket (fallback mode)
   const handleAudio = useCallback(
     (audioData: string, format: string) => {
       audioPlayer.play(audioData, format);
+    },
+    [audioPlayer]
+  );
+
+  // Handle audio chunks for parallel TTS streaming (faster response)
+  const handleAudioChunk = useCallback(
+    (chunk: { data: string; format: string; index: number; total: number; isLast: boolean }) => {
+      audioPlayer.playChunk(chunk);
     },
     [audioPlayer]
   );
@@ -32,6 +40,7 @@ export default function Home() {
   } = useWebSocket({
     url: WS_URL,
     onAudio: handleAudio,
+    onAudioChunk: handleAudioChunk,
   });
 
   return (

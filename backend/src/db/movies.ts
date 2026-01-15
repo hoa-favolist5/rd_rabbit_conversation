@@ -66,11 +66,11 @@ export async function searchMovies(
     }
 
     // Filter by genre
-    if (genre) {
-      sql += ` AND $${paramIndex} = ANY(genre)`;
-      params.push(genre);
-      paramIndex++;
-    }
+    // if (genre) {
+    //   sql += ` AND $${paramIndex} = ANY(genre)`;
+    //   params.push(genre);
+    //   paramIndex++;
+    // }
 
     // Filter by year
     if (year) {
@@ -89,7 +89,7 @@ export async function searchMovies(
       title_ja: row.title_ja,
       title_en: row.title_en,
       description: row.description,
-      genre: row.genre || [],
+      // genre: row.genre || [],
       release_year: row.release_year,
       rating: row.rating ? parseFloat(row.rating) : null,
       director: row.director,

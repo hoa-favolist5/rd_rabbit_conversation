@@ -16,6 +16,9 @@ interface WorkflowTiming {
   dbSearchTime: number;
   usedTool: boolean;
   totalMs: number;
+  // Frontend-measured timings (actual perceived latency)
+  timeToFirstResponse?: number;
+  timeToFirstAudio?: number;
 }
 
 interface WorkflowTimingDisplayProps {
@@ -86,13 +89,26 @@ export function WorkflowTimingDisplay({ timing }: WorkflowTimingDisplayProps) {
 
   return (
     <div className={styles.container}>
-      {/* Header */}
+      {/* Header with TTFR (Time to First Response) - the key metric */}
       <div className={styles.header}>
         <div className={styles.headerLeft}>
           <span className={styles.icon}>📊</span>
           <span className={styles.title}>Workflow Performance</span>
         </div>
         <div className={styles.headerRight}>
+          {timing.timeToFirstResponse !== undefined && (
+            <>
+              <span className={styles.ttfrLabel}>⚡ TTFR:</span>
+              <span
+                className={styles.ttfrValue}
+                style={{ color: getTimingColor(timing.timeToFirstResponse) }}
+                title="Time to First Response - actual perceived latency"
+              >
+                {formatDuration(timing.timeToFirstResponse)}
+              </span>
+              <span className={styles.separator}>|</span>
+            </>
+          )}
           <span className={styles.totalLabel}>Total:</span>
           <span
             className={styles.totalValue}
@@ -102,6 +118,42 @@ export function WorkflowTimingDisplay({ timing }: WorkflowTimingDisplayProps) {
           </span>
         </div>
       </div>
+      
+      {/* TTFR Highlight Box */}
+      {(timing.timeToFirstResponse !== undefined || timing.timeToFirstAudio !== undefined) && (
+        <div className={styles.ttfrBox}>
+          <div className={styles.ttfrMetric}>
+            <span className={styles.ttfrIcon}>⚡</span>
+            <span className={styles.ttfrMetricLabel}>初回応答</span>
+            <span 
+              className={styles.ttfrMetricValue}
+              style={{ color: timing.timeToFirstResponse ? getTimingColor(timing.timeToFirstResponse) : "#6b7280" }}
+            >
+              {timing.timeToFirstResponse !== undefined ? formatDuration(timing.timeToFirstResponse) : "N/A"}
+            </span>
+          </div>
+          <div className={styles.ttfrMetric}>
+            <span className={styles.ttfrIcon}>🔊</span>
+            <span className={styles.ttfrMetricLabel}>初回音声</span>
+            <span 
+              className={styles.ttfrMetricValue}
+              style={{ color: timing.timeToFirstAudio ? getTimingColor(timing.timeToFirstAudio) : "#6b7280" }}
+            >
+              {timing.timeToFirstAudio !== undefined ? formatDuration(timing.timeToFirstAudio) : "N/A"}
+            </span>
+          </div>
+          <div className={styles.ttfrMetric}>
+            <span className={styles.ttfrIcon}>🏁</span>
+            <span className={styles.ttfrMetricLabel}>完了時間</span>
+            <span 
+              className={styles.ttfrMetricValue}
+              style={{ color: getTimingColor(timing.totalMs) }}
+            >
+              {formatDuration(timing.totalMs)}
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* Waterfall Timeline */}
       <div className={styles.timeline}>

@@ -24,6 +24,22 @@ const MAX_TOKENS_DEFAULT = 64;
 const MAX_TOKENS_TOOL = 128;
 const MAX_TOKENS_TOOL_FOLLOWUP = 160;
 
+// Request timeout for better UX (inspired by TEN Framework)
+const REQUEST_TIMEOUT_MS = 8000;
+const RETRY_ATTEMPTS = 1;
+
+/**
+ * Wrap a promise with timeout
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number, operation: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => 
+      setTimeout(() => reject(new Error(`${operation} timed out after ${ms}ms`)), ms)
+    )
+  ]);
+}
+
 // Tool definitions for Claude
 const tools: Anthropic.Tool[] = [
   {
@@ -50,10 +66,47 @@ const MOVIE_KEYWORDS = [
   "見たい", "観たい", "上映", "公開", "評価", "レビュー"
 ];
 
-// Simple in-memory cache for common requests
+// Enhanced in-memory cache for common requests (inspired by TEN Framework)
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const CACHE_LIMIT = 200;
 const responseCache = new Map<string, { value: ChatResponse; timestamp: number }>();
+
+// Common greeting patterns for instant responses
+const INSTANT_RESPONSES: Map<RegExp, ChatResponse> = new Map([
+  [/^(こんにちは|こんにちわ|hello|hi|ハロー)$/i, { 
+    text: "こんにちは！何かお手伝いできることはありますか？", 
+    emotion: "happy" as EmotionType, 
+    usedTool: false 
+  }],
+  [/^(ありがとう|ありがとうございます|thanks|thank you)$/i, { 
+    text: "どういたしまして！他にご質問があればお気軽にどうぞ！", 
+    emotion: "happy" as EmotionType, 
+    usedTool: false 
+  }],
+  [/^(さようなら|バイバイ|bye|goodbye)$/i, { 
+    text: "さようなら！またお話しましょうね！", 
+    emotion: "happy" as EmotionType, 
+    usedTool: false 
+  }],
+  [/^(はい|うん|ok|okay)$/i, { 
+    text: "はい！何か質問がありますか？", 
+    emotion: "neutral" as EmotionType, 
+    usedTool: false 
+  }],
+]);
+
+/**
+ * Check for instant responses (no API call needed)
+ */
+function getInstantResponse(message: string): ChatResponse | null {
+  const trimmed = message.trim();
+  for (const [pattern, response] of INSTANT_RESPONSES) {
+    if (pattern.test(trimmed)) {
+      return response;
+    }
+  }
+  return null;
+}
 
 /**
  * Check if the query needs movie search tools
@@ -135,31 +188,67 @@ function formatMovieResults(results: MovieSearchResult): string {
     y: m.release_year,
     r: m.rating,
     d: m.director,
-    g: m.genre?.slice(0, 2)
+    // g: m.genre?.slice(0, 2)
   }));
 
   return JSON.stringify(compact);
 }
 
 /**
+ * Sentence boundary detection for streaming TTS
+ */
+const SENTENCE_ENDINGS = /([。！？!?.]+)/;
+
+/**
+ * Parse streaming text into complete sentences for TTS
+ */
+export function* extractCompleteSentences(buffer: string): Generator<{ sentence: string; remaining: string }> {
+  const parts = buffer.split(SENTENCE_ENDINGS);
+  let accumulated = "";
+  
+  for (let i = 0; i < parts.length - 1; i += 2) {
+    const text = parts[i];
+    const ending = parts[i + 1] || "";
+    const sentence = text + ending;
+    if (sentence.trim().length > 0) {
+      yield { sentence: sentence.trim(), remaining: parts.slice(i + 2).join("") };
+    }
+  }
+}
+
+/**
  * Chat with Claude - optimized for performance
+ * Now supports sentence-level streaming for parallel TTS
  */
 export async function chat(
   history: ConversationTurn[],
   userMessage: string,
   onMovieSearch?: (query: string, genre?: string, year?: number) => Promise<MovieSearchResult>,
-  onChunk?: (text: string) => void
+  onChunk?: (text: string) => void,
+  onSentence?: (sentence: string, emotion: EmotionType) => void
 ): Promise<ChatResponse> {
   const messages = [
     ...toClaudeMessages(history),
     { role: "user" as const, content: userMessage },
   ];
 
+  // Check for instant responses first (no API call, ~0ms)
+  if (history.length === 0 || history.length === 1) {
+    const instant = getInstantResponse(userMessage);
+    if (instant) {
+      console.log("⚡ Instant response (no API call)");
+      if (onChunk) onChunk(instant.text);
+      if (onSentence) onSentence(instant.text, instant.emotion);
+      return instant;
+    }
+  }
+
   const useTools = needsMovieSearch(userMessage);
   const cacheKey = useTools ? null : getCacheKey(history, userMessage);
   const cached = getCachedResponse(cacheKey);
   if (cached) {
     if (onChunk) onChunk(cached.text);
+    if (onSentence) onSentence(cached.text, cached.emotion);
     return cached;
   }
 
@@ -174,11 +263,40 @@ export async function chat(
       });
 
       let fullText = "";
+      let sentenceBuffer = "";
+      let detectedEmotion: EmotionType = "neutral";
+      let emotionParsed = false;
+
       for await (const event of stream) {
         if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
-          fullText += event.delta.text;
-          onChunk(event.delta.text);
+          const delta = event.delta.text;
+          fullText += delta;
+          onChunk(delta);
+
+          // Parse emotion from beginning of response
+          if (!emotionParsed && fullText.includes("]")) {
+            const parsed = parseEmotionAndText(fullText);
+            detectedEmotion = parsed.emotion;
+            emotionParsed = true;
+            // Start sentence buffer from text after emotion tag
+            sentenceBuffer = parsed.text;
+          } else if (emotionParsed) {
+            sentenceBuffer += delta;
+          }
+
+          // Emit complete sentences for parallel TTS processing
+          if (onSentence && emotionParsed) {
+            for (const { sentence, remaining } of extractCompleteSentences(sentenceBuffer)) {
+              onSentence(sentence, detectedEmotion);
+              sentenceBuffer = remaining;
+            }
+          }
         }
+      }
+
+      // Emit any remaining text as final sentence
+      if (onSentence && sentenceBuffer.trim().length > 0) {
+        onSentence(sentenceBuffer.trim(), detectedEmotion);
       }
 
       const { emotion, text } = parseEmotionAndText(fullText);
@@ -205,6 +323,70 @@ export async function chat(
         const input = toolUseBlock.input as { query: string; genre?: string; year?: number };
         const movieResults = await onMovieSearch(input.query, input.genre, input.year);
 
+        // Use streaming for follow-up response to enable parallel TTS
+        if (onChunk || onSentence) {
+          const followUpStream = await anthropic.messages.stream({
+            model: "claude-3-5-haiku-20241022",
+            max_tokens: MAX_TOKENS_TOOL_FOLLOWUP,
+            system: SYSTEM_PROMPT,
+            stop_sequences: STOP_SEQUENCES,
+            messages: [
+              ...messages,
+              { role: "assistant", content: response.content },
+              {
+                role: "user",
+                content: [
+                  {
+                    type: "tool_result",
+                    tool_use_id: toolUseBlock.id,
+                    content: formatMovieResults(movieResults),
+                  },
+                ],
+              },
+            ],
+          });
+
+          let fullText = "";
+          let sentenceBuffer = "";
+          let detectedEmotion: EmotionType = "neutral";
+          let emotionParsed = false;
+
+          for await (const event of followUpStream) {
+            if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
+              const delta = event.delta.text;
+              fullText += delta;
+              if (onChunk) onChunk(delta);
+
+              // Parse emotion from beginning of response
+              if (!emotionParsed && fullText.includes("]")) {
+                const parsed = parseEmotionAndText(fullText);
+                detectedEmotion = parsed.emotion;
+                emotionParsed = true;
+                sentenceBuffer = parsed.text;
+              } else if (emotionParsed) {
+                sentenceBuffer += delta;
+              }
+
+              // Emit complete sentences for parallel TTS
+              if (onSentence && emotionParsed) {
+                for (const { sentence, remaining } of extractCompleteSentences(sentenceBuffer)) {
+                  onSentence(sentence, detectedEmotion);
+                  sentenceBuffer = remaining;
+                }
+              }
+            }
+          }
+
+          // Emit remaining text as final sentence
+          if (onSentence && sentenceBuffer.trim().length > 0) {
+            onSentence(sentenceBuffer.trim(), detectedEmotion);
+          }
+
+          const { emotion, text } = parseEmotionAndText(fullText);
+          return { text, emotion, usedTool: true };
+        }
+
+        // Non-streaming fallback
         const followUpResponse = await anthropic.messages.create({
           model: "claude-3-5-haiku-20241022",
           max_tokens: MAX_TOKENS_TOOL_FOLLOWUP,

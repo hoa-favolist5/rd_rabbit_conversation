@@ -22,6 +22,9 @@ export interface WorkflowTiming {
   dbSearchTime: number;
   usedTool: boolean;
   totalMs: number;
+  // Frontend-measured timings (actual perceived latency)
+  timeToFirstResponse?: number;  // Time from send to first text delta
+  timeToFirstAudio?: number;     // Time from send to first audio chunk
 }
 
 // Legacy timing format (for backwards compatibility)
@@ -30,9 +33,18 @@ export interface TimingInfo {
   totalMs: number;
 }
 
+interface AudioChunk {
+  data: string;
+  format: string;
+  index: number;
+  total: number;
+  isLast: boolean;
+}
+
 interface UseWebSocketOptions {
   url: string;
   onAudio?: (audioData: string, format: string) => void;
+  onAudioChunk?: (chunk: AudioChunk) => void;
 }
 
 interface UseWebSocketReturn {
@@ -52,6 +64,7 @@ interface UseWebSocketReturn {
 export function useWebSocket({
   url,
   onAudio,
+  onAudioChunk,
 }: UseWebSocketOptions): UseWebSocketReturn {
   const [isConnected, setIsConnected] = useState(false);
   const [status, setStatus] = useState<ConversationStatus>("idle");
@@ -65,6 +78,11 @@ export function useWebSocket({
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const messageIdRef = useRef(0);
+  
+  // Timing refs for measuring actual perceived latency
+  const requestStartTimeRef = useRef<number | null>(null);
+  const firstResponseTimeRef = useRef<number | null>(null);
+  const firstAudioTimeRef = useRef<number | null>(null);
 
   // Generate unique message ID
   const generateId = useCallback(() => {
@@ -188,6 +206,13 @@ export function useWebSocket({
           const delta = message.text as string;
           if (!messageId || !delta) break;
 
+          // Record time to first response (first text delta)
+          if (requestStartTimeRef.current && !firstResponseTimeRef.current) {
+            firstResponseTimeRef.current = performance.now();
+            const ttfr = Math.round(firstResponseTimeRef.current - requestStartTimeRef.current);
+            console.log(`⚡ Time to First Response: ${ttfr}ms`);
+          }
+
           setMessages((prev) => {
             const index = prev.findIndex((m) => m.id === messageId);
             if (index >= 0) {
@@ -212,7 +237,29 @@ export function useWebSocket({
         }
 
         case "audio":
+          // Record time to first audio
+          if (requestStartTimeRef.current && !firstAudioTimeRef.current) {
+            firstAudioTimeRef.current = performance.now();
+            const ttfa = Math.round(firstAudioTimeRef.current - requestStartTimeRef.current);
+            console.log(`🔊 Time to First Audio: ${ttfa}ms`);
+          }
           onAudio?.(message.data as string, message.format as string);
+          break;
+
+        case "audio_chunk":
+          // Record time to first audio chunk
+          if (requestStartTimeRef.current && !firstAudioTimeRef.current) {
+            firstAudioTimeRef.current = performance.now();
+            const ttfa = Math.round(firstAudioTimeRef.current - requestStartTimeRef.current);
+            console.log(`🔊 Time to First Audio Chunk: ${ttfa}ms`);
+          }
+          onAudioChunk?.({
+            data: message.data as string,
+            format: message.format as string,
+            index: message.index as number,
+            total: message.total as number,
+            isLast: message.isLast as boolean,
+          });
           break;
 
         case "error":
@@ -226,13 +273,23 @@ export function useWebSocket({
           });
           break;
 
-        case "workflow_timing":
+        case "workflow_timing": {
+          // Calculate frontend-measured timings
+          const timeToFirstResponse = (requestStartTimeRef.current && firstResponseTimeRef.current)
+            ? Math.round(firstResponseTimeRef.current - requestStartTimeRef.current)
+            : undefined;
+          const timeToFirstAudio = (requestStartTimeRef.current && firstAudioTimeRef.current)
+            ? Math.round(firstAudioTimeRef.current - requestStartTimeRef.current)
+            : undefined;
+          
           setWorkflowTiming({
             steps: message.steps as WorkflowStep[],
             hasDbSearch: message.hasDbSearch as boolean,
             dbSearchTime: message.dbSearchTime as number,
             usedTool: message.usedTool as boolean,
             totalMs: message.totalMs as number,
+            timeToFirstResponse,
+            timeToFirstAudio,
           });
           // Also set legacy timing for backwards compatibility
           setLastTiming({
@@ -242,7 +299,13 @@ export function useWebSocket({
             })),
             totalMs: message.totalMs as number,
           });
+          
+          // Reset timing refs for next request
+          requestStartTimeRef.current = null;
+          firstResponseTimeRef.current = null;
+          firstAudioTimeRef.current = null;
           break;
+        }
 
         case "pong":
           // Heartbeat response
@@ -252,12 +315,17 @@ export function useWebSocket({
           console.log("Unknown message type:", message.type);
       }
     },
-    [generateId, onAudio]
+    [generateId, onAudio, onAudioChunk]
   );
 
   // Send message to server
   const sendMessage = useCallback((text: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
+      // Start timing for TTFR measurement
+      requestStartTimeRef.current = performance.now();
+      firstResponseTimeRef.current = null;
+      firstAudioTimeRef.current = null;
+      
       wsRef.current.send(
         JSON.stringify({
           type: "text_input",

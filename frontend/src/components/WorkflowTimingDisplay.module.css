@@ -51,6 +51,57 @@
   font-size: 16px;
 }
 
+.ttfrLabel {
+  color: #f59e0b;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ttfrValue {
+  font-weight: 700;
+  font-size: 16px;
+}
+
+.separator {
+  color: #d1d5db;
+  font-size: 14px;
+}
+
+/* TTFR Highlight Box */
+.ttfrBox {
+  display: flex;
+  justify-content: space-around;
+  gap: 8px;
+  padding: 12px;
+  background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+  border-radius: 10px;
+  margin-bottom: 16px;
+  border: 1px solid #fcd34d;
+}
+
+.ttfrMetric {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-width: 80px;
+}
+
+.ttfrIcon {
+  font-size: 18px;
+}
+
+.ttfrMetricLabel {
+  font-size: 10px;
+  color: #92400e;
+  font-weight: 500;
+}
+
+.ttfrMetricValue {
+  font-size: 18px;
+  font-weight: 700;
+}
+
 /* Timeline */
 .timeline {
   margin-bottom: 16px;

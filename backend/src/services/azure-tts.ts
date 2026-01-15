@@ -8,6 +8,33 @@ const VOICES = {
   male: "ja-JP-KeitaNeural",   // Male voice with emotion support
 } as const;
 
+// Connection pool for Azure TTS (inspired by TEN Framework)
+// Reduces cold start latency by reusing SDK configuration
+const POOL_SIZE = 3;
+const speechConfigPool: sdk.SpeechConfig[] = [];
+let poolIndex = 0;
+
+/**
+ * Get a speech config from the pool (round-robin)
+ * This avoids creating new configs for each request
+ */
+function getSpeechConfig(): sdk.SpeechConfig {
+  if (speechConfigPool.length < POOL_SIZE) {
+    const speechConfig = sdk.SpeechConfig.fromSubscription(
+      config.azure.speechKey,
+      config.azure.speechRegion
+    );
+    speechConfig.speechSynthesisOutputFormat =
+      sdk.SpeechSynthesisOutputFormat.Audio16Khz32KBitRateMonoMp3;
+    speechConfigPool.push(speechConfig);
+    return speechConfig;
+  }
+  
+  const configInstance = speechConfigPool[poolIndex];
+  poolIndex = (poolIndex + 1) % POOL_SIZE;
+  return configInstance;
+}
+
 // Map emotion types to Azure TTS speaking styles
 const EMOTION_STYLES: Record<EmotionType, string> = {
   happy: "cheerful",
@@ -82,7 +109,11 @@ function generateSSML(
 
 /**
  * Synthesize speech from text using Azure Neural TTS
- * Returns audio data as Buffer (WAV format)
+ * Returns audio data as Buffer (MP3 format)
+ * 
+ * Performance optimizations (inspired by TEN Framework):
+ * - Connection pooling to reduce cold start
+ * - Reuses SDK configuration
  */
 export async function synthesizeSpeech(
   text: string,
@@ -90,15 +121,8 @@ export async function synthesizeSpeech(
 ): Promise<Buffer> {
   const { voice = "female", emotion = "neutral" } = options;
 
-  // Create speech config
-  const speechConfig = sdk.SpeechConfig.fromSubscription(
-    config.azure.speechKey,
-    config.azure.speechRegion
-  );
-
-  // Set output format to high quality audio
-  speechConfig.speechSynthesisOutputFormat =
-    sdk.SpeechSynthesisOutputFormat.Audio16Khz32KBitRateMonoMp3;
+  // Get speech config from pool (faster than creating new)
+  const speechConfig = getSpeechConfig();
 
   // Generate SSML
   const ssml = generateSSML(text, voice, emotion);

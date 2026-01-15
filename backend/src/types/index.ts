@@ -59,6 +59,16 @@ export interface AudioDataMessage extends WSMessage {
   data: string; // base64 encoded audio
 }
 
+// Chunked audio for parallel TTS streaming
+export interface AudioChunkMessage extends WSMessage {
+  type: "audio_chunk";
+  data: string; // base64 encoded audio chunk
+  format: string;
+  index: number;
+  total: number;
+  isLast: boolean;
+}
+
 // Control messages from client
 export interface StartListeningMessage extends WSMessage {
   type: "start_listening";
@@ -85,7 +95,7 @@ export interface Movie {
   title_ja: string;
   title_en: string | null;
   description: string | null;
-  genre: string[];
+  // genre: string[];
   release_year: number | null;
   rating: number | null;
   director: string | null;

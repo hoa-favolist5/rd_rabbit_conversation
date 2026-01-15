@@ -1,6 +1,6 @@
 import { WebSocket } from "ws";
 import { v4 as uuidv4 } from "uuid";
-import { chat, needsMovieSearch } from "../services/claude.js";
+import { chat, needsMovieSearch, extractCompleteSentences } from "../services/claude.js";
 import { synthesizeSpeechBase64 } from "../services/azure-tts.js";
 import { searchMovies } from "../db/movies.js";
 import { startTimer } from "../utils/timer.js";
@@ -14,6 +14,10 @@ import type {
   ErrorMessage,
   WSMessage,
 } from "../types/index.js";
+
+// Configuration for parallel TTS streaming
+const ENABLE_PARALLEL_TTS = true;
+const MIN_SENTENCE_LENGTH_FOR_TTS = 5;
 
 // Workflow step definitions matching WORKFLOW.md
 type WorkflowStep = 
@@ -328,6 +332,17 @@ async function processUserInput(session: Session, userText: string): Promise<voi
         })().catch(() => null)
       : null;
 
+    // Parallel TTS: Queue sentences and synthesize while LLM is still streaming
+    interface TTSChunkResult {
+      audio: string;
+      sentence: string;
+      index: number;
+      durationMs: number;
+      charCount: number;
+    }
+    const ttsQueue: Promise<TTSChunkResult | null>[] = [];
+    let sentenceIndex = 0;
+
     const response = await chat(
       history,
       userText,
@@ -354,7 +369,33 @@ async function processUserInput(session: Session, userText: string): Promise<voi
       (delta) => {
         // Stream partial text to client for faster perceived response
         sendAssistantDelta(ws, delta, assistantMessageId);
-      }
+      },
+      ENABLE_PARALLEL_TTS ? (sentence, emotion) => {
+        // Parallel TTS: Start synthesizing each sentence immediately
+        if (sentence.length >= MIN_SENTENCE_LENGTH_FOR_TTS) {
+          const idx = sentenceIndex++;
+          const startTime = performance.now();
+          const charCount = sentence.length;
+          
+          console.log(`🎙️ [${session.id.slice(0, 8)}] TTS Chunk #${idx} START: "${sentence}" (${charCount} chars)`);
+          
+          const ttsPromise = synthesizeSpeechBase64(sentence, {
+            emotion,
+            voice: "female",
+          }).then(audio => {
+            const durationMs = Math.round(performance.now() - startTime);
+            const audioSizeKB = Math.round(audio.length * 0.75 / 1024); // base64 to KB
+            console.log(`✅ [${session.id.slice(0, 8)}] TTS Chunk #${idx} DONE: ${durationMs}ms | ${charCount} chars | ${audioSizeKB}KB audio`);
+            return { audio, sentence, index: idx, durationMs, charCount };
+          }).catch(err => {
+            const durationMs = Math.round(performance.now() - startTime);
+            console.error(`❌ [${session.id.slice(0, 8)}] TTS Chunk #${idx} FAILED after ${durationMs}ms:`, err);
+            return null;
+          });
+          
+          ttsQueue.push(ttsPromise);
+        }
+      } : undefined
     );
 
     workflow.endStep({
@@ -385,36 +426,116 @@ async function processUserInput(session: Session, userText: string): Promise<voi
     sendStatus(ws, "speaking", response.emotion, "話しています...");
     workflow.endStep({ textLength: response.text.length, emotion: response.emotion });
 
-    // STEP 8: TTS synthesis
-    let audioBase64: string | null = null;
-    try {
-      audioBase64 = await workflow.trackStep(
-        "STEP8_TTS_SYNTHESIS",
-        async () => {
-          return synthesizeSpeechBase64(response.text, {
-            emotion: response.emotion,
-            voice: "female",
+    // STEP 8: TTS synthesis (parallel mode or fallback)
+    workflow.startStep("STEP8_TTS_SYNTHESIS");
+    
+    let audioSent = false;
+    
+    if (ENABLE_PARALLEL_TTS && ttsQueue.length > 0) {
+      // Process parallel TTS results as they complete
+      console.log(`\n🔊 [${session.id.slice(0, 8)}] Processing ${ttsQueue.length} parallel TTS chunks...`);
+      console.log(`${"─".repeat(80)}`);
+      
+      const chunkResults: TTSChunkResult[] = [];
+      let totalTTSTime = 0;
+      let totalChars = 0;
+      let totalAudioKB = 0;
+      
+      for (let i = 0; i < ttsQueue.length; i++) {
+        const result = await ttsQueue[i];
+        if (result) {
+          chunkResults.push(result);
+          totalTTSTime += result.durationMs;
+          totalChars += result.charCount;
+          const audioKB = Math.round(result.audio.length * 0.75 / 1024);
+          totalAudioKB += audioKB;
+          
+          // Send audio chunk with index for ordered playback on client
+          send(ws, {
+            type: "audio_chunk",
+            data: result.audio,
+            format: "mp3",
+            index: i,
+            total: ttsQueue.length,
+            isLast: i === ttsQueue.length - 1,
           });
-        },
-        { textLength: response.text.length, emotion: response.emotion }
-      );
-    } catch (ttsError) {
-      console.error("TTS error:", ttsError);
-      send(ws, {
-        type: "tts_error",
-        message: "音声生成に失敗しました",
+          audioSent = true;
+        }
+      }
+      
+      // Log detailed TTS summary
+      console.log(`\n📊 TTS Chunk Summary (${session.id.slice(0, 8)}):`);
+      console.log(`${"─".repeat(80)}`);
+      console.log(`| ${"#".padEnd(3)} | ${"Time".padEnd(8)} | ${"Chars".padEnd(6)} | ${"Content".padEnd(50)} |`);
+      console.log(`|${"-".repeat(5)}|${"-".repeat(10)}|${"-".repeat(8)}|${"-".repeat(52)}|`);
+      
+      for (const chunk of chunkResults) {
+        const content = chunk.sentence.length > 48 
+          ? chunk.sentence.slice(0, 45) + "..." 
+          : chunk.sentence;
+        console.log(`| ${String(chunk.index).padEnd(3)} | ${(chunk.durationMs + "ms").padEnd(8)} | ${String(chunk.charCount).padEnd(6)} | ${content.padEnd(50)} |`);
+      }
+      
+      console.log(`${"─".repeat(80)}`);
+      console.log(`| ${"SUM".padEnd(3)} | ${(totalTTSTime + "ms").padEnd(8)} | ${String(totalChars).padEnd(6)} | Total audio: ${totalAudioKB}KB across ${chunkResults.length} chunks`.padEnd(53) + ` |`);
+      console.log(`${"─".repeat(80)}\n`);
+      
+      workflow.endStep({ 
+        mode: "parallel", 
+        chunks: ttsQueue.length,
+        totalTTSTime,
+        textLength: response.text.length 
       });
     }
+    
+    // Fallback: synthesize full response if parallel TTS didn't produce audio
+    if (!audioSent) {
+      console.log(`\n🔊 [${session.id.slice(0, 8)}] Sequential TTS (fallback mode)...`);
+      const seqStartTime = performance.now();
+      
+      try {
+        const audioBase64 = await synthesizeSpeechBase64(response.text, {
+          emotion: response.emotion,
+          voice: "female",
+        });
+        
+        const seqDuration = Math.round(performance.now() - seqStartTime);
+        const audioKB = Math.round(audioBase64.length * 0.75 / 1024);
+        
+        console.log(`${"─".repeat(80)}`);
+        console.log(`📊 TTS Sequential Summary (${session.id.slice(0, 8)}):`);
+        console.log(`   Content: "${response.text.slice(0, 60)}${response.text.length > 60 ? "..." : ""}"`);
+        console.log(`   Chars: ${response.text.length} | Time: ${seqDuration}ms | Audio: ${audioKB}KB`);
+        console.log(`${"─".repeat(80)}\n`);
+        
+        workflow.endStep({ 
+          mode: "sequential",
+          textLength: response.text.length, 
+          durationMs: seqDuration,
+          emotion: response.emotion 
+        });
 
-    // STEP 9: Send audio data
-    if (audioBase64) {
+        // STEP 9: Send audio data
+        workflow.startStep("STEP9_AUDIO_SEND");
+        send(ws, {
+          type: "audio",
+          data: audioBase64,
+          format: "mp3",
+        });
+        workflow.endStep({ audioSize: audioBase64.length });
+        audioSent = true;
+      } catch (ttsError) {
+        console.error("TTS error:", ttsError);
+        workflow.endStep({ error: true });
+        send(ws, {
+          type: "tts_error",
+          message: "音声生成に失敗しました",
+        });
+      }
+    } else {
+      // Mark audio send complete for parallel mode
       workflow.startStep("STEP9_AUDIO_SEND");
-      send(ws, {
-        type: "audio",
-        data: audioBase64,
-        format: "mp3",
-      });
-      workflow.endStep({ audioSize: audioBase64.length });
+      workflow.endStep({ mode: "parallel_streaming" });
     }
 
     // STEP 11: Send timing info
@@ -510,7 +631,7 @@ export function handleConnection(ws: WebSocket): void {
   setTimeout(async () => {
     const greetingTimer = startTimer("Greeting TTS");
     try {
-      const greeting = "こんにちは！ラビットです。何かお手伝いできることはありますか？映画について聞きたいことがあれば、何でも聞いてくださいね！";
+      const greeting = "こんにちは！";
       
       sendAssistantMessage(ws, greeting, "happy");
       session.history.push({ role: "assistant", content: greeting });
