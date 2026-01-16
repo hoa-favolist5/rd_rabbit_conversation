@@ -125,7 +125,7 @@ export function ChatInput({
 
   // Calculate speech-band energy with formant analysis for human voice detection
   // Memoize expensive frequency calculations for performance
-  const calculateSpeechEnergy = useCallback((analyser: AnalyserNode, frequencyData: Uint8Array): number => {
+  const calculateSpeechEnergy = useCallback((analyser: AnalyserNode, frequencyData: Uint8Array<ArrayBuffer>): number => {
     analyser.getByteFrequencyData(frequencyData);
     
     const sampleRate = analyser.context.sampleRate;
@@ -224,7 +224,8 @@ export function ChatInput({
       source.connect(analyser);
 
       // Start VAD monitoring for echo prevention and visual feedback
-      const frequencyData = new Uint8Array(analyser.frequencyBinCount);
+      const buffer = new ArrayBuffer(analyser.frequencyBinCount);
+      const frequencyData = new Uint8Array(buffer);
       voiceConfirmCountRef.current = 0;
       
       vadIntervalRef.current = setInterval(() => {
