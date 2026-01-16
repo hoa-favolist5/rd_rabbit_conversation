@@ -86,6 +86,7 @@ export function ChatInput({
   const finalTranscriptRef = useRef<string>("");
   const hasSpokenRef = useRef<boolean>(false);
   const shouldRestartRef = useRef<boolean>(false);
+  const restartCountRef = useRef<number>(0);
   
   // WebRTC AEC refs for VAD visual feedback
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -116,10 +117,7 @@ export function ChatInput({
   }, []);
 
   // Calculate speech-band energy with formant analysis for human voice detection
-  // Human voice has characteristic energy distribution:
-  // - Fundamental frequency (85-255Hz for adults)
-  // - Formants (resonant peaks at ~300-1000Hz, ~1000-2500Hz, ~2500-3500Hz)
-  // - Noise/music has flat or different spectral shape
+  // Memoize expensive frequency calculations for performance
   const calculateSpeechEnergy = useCallback((analyser: AnalyserNode, frequencyData: Uint8Array): number => {
     analyser.getByteFrequencyData(frequencyData);
     
@@ -191,18 +189,13 @@ export function ChatInput({
   // Start WebRTC-style audio monitoring with AEC
   const startAudioMonitoring = useCallback(async () => {
     try {
-      // Request mic with maximum echo cancellation
+      // Request mic with echo cancellation for VAD
+      // Keep settings moderate to not interfere with Web Speech API
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
-          echoCancellation: true,      // Enable AEC
-          noiseSuppression: true,      // Enable noise suppression
-          autoGainControl: true,       // Enable AGC
-          // Advanced constraints for better AEC
-          // @ts-expect-error - experimental constraints
-          googEchoCancellation: true,
-          googAutoGainControl: true,
-          googNoiseSuppression: true,
-          googHighpassFilter: true,
+          echoCancellation: true,
+          noiseSuppression: false,  // Let Web Speech API handle this
+          autoGainControl: true,
         },
       });
 
@@ -212,9 +205,11 @@ export function ChatInput({
       const audioContext = new AudioContext();
       audioContextRef.current = audioContext;
 
-      // Create analyser for energy detection
+      // Create analyser for frequency-based voice detection
+      // FFT size 512 provides good balance between frequency resolution and performance
       const analyser = audioContext.createAnalyser();
-      analyser.fftSize = 256;
+      analyser.fftSize = 512;
+      analyser.smoothingTimeConstant = 0.8; // Smooth out noise
       analyserRef.current = analyser;
 
       // Connect mic to analyser
@@ -243,8 +238,6 @@ export function ChatInput({
         // Require multiple consecutive frames to confirm voice (debouncing)
         const isConfirmedVoice = voiceConfirmCountRef.current >= VAD_CONFIRM_FRAMES;
         setVoiceDetected(isConfirmedVoice);
-        
-        // Note: No barge-in action here - backend handles it when new message is submitted
       }, VAD_CHECK_INTERVAL_MS);
 
       return true;
@@ -277,24 +270,36 @@ export function ChatInput({
     setVoiceDetected(false);
   }, []);
 
+  // Clean up recognition instance to prevent memory leaks
+  const cleanupRecognition = useCallback(() => {
+    if (recognitionRef.current) {
+      recognitionRef.current.onstart = null;
+      recognitionRef.current.onresult = null;
+      recognitionRef.current.onerror = null;
+      recognitionRef.current.onend = null;
+      try {
+        recognitionRef.current.stop();
+      } catch (e) {
+        // Ignore errors if already stopped
+      }
+      recognitionRef.current = null;
+    }
+  }, []);
+
   // Full stop - completely stop recording
   const fullStop = useCallback(() => {
     clearSilenceTimer();
     shouldRestartRef.current = false;
+    restartCountRef.current = 0;
     
-    if (recognitionRef.current) {
-      recognitionRef.current.onend = null;
-      recognitionRef.current.stop();
-      recognitionRef.current = null;
-    }
-    
+    cleanupRecognition();
     stopAudioMonitoring();
     
     setIsRecording(false);
     setInterimTranscript("");
     finalTranscriptRef.current = "";
     hasSpokenRef.current = false;
-  }, [clearSilenceTimer, stopAudioMonitoring]);
+  }, [clearSilenceTimer, cleanupRecognition, stopAudioMonitoring]);
 
   // Submit transcript and continue listening
   const submitAndContinue = useCallback(() => {
@@ -330,31 +335,8 @@ export function ChatInput({
     }, SILENCE_TIMEOUT_MS);
   }, [clearSilenceTimer, submitAndContinue]);
 
-  // Start recording
-  const startRecording = useCallback(async () => {
-    if (isRecording) return;
-
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      console.error("Web Speech API not supported");
-      return;
-    }
-
-    // Start audio monitoring for VAD-based barge-in
-    const audioStarted = await startAudioMonitoring();
-    if (!audioStarted) {
-      console.error("Failed to start audio monitoring");
-      return;
-    }
-
-    const recognition = new SpeechRecognition();
-    recognitionRef.current = recognition;
-    shouldRestartRef.current = true;
-    
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = "ja-JP";
-
+  // Setup recognition handlers (reusable for fresh instances)
+  const setupRecognitionHandlers = useCallback((recognition: SpeechRecognition) => {
     recognition.onstart = () => {
       setIsRecording(true);
       finalTranscriptRef.current = "";
@@ -396,17 +378,75 @@ export function ChatInput({
     };
 
     recognition.onend = () => {
-      if (shouldRestartRef.current && recognitionRef.current) {
-        try {
-          recognition.start();
-        } catch (e) {
-          console.error("Failed to restart recognition:", e);
-          fullStop();
-        }
-      } else {
+      if (!shouldRestartRef.current) {
         setIsRecording(false);
+        return;
+      }
+      
+      restartCountRef.current++;
+      
+      // Recreate instance every 10 restarts to prevent memory buildup
+      if (restartCountRef.current >= 10) {
+        console.log("🔄 Memory cleanup: recreating speech recognition");
+        restartCountRef.current = 0;
+        
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (SpeechRecognition) {
+          const newRecognition = new SpeechRecognition();
+          newRecognition.continuous = true;
+          newRecognition.interimResults = true;
+          newRecognition.lang = "ja-JP";
+          
+          recognitionRef.current = newRecognition;
+          setupRecognitionHandlers(newRecognition);
+          
+          try {
+            newRecognition.start();
+          } catch (e) {
+            console.error("Failed to restart with new instance:", e);
+            fullStop();
+          }
+        }
+        return;
+      }
+      
+      // Normal restart
+      try {
+        recognition.start();
+      } catch (e) {
+        console.error("Failed to restart recognition:", e);
+        fullStop();
       }
     };
+  }, [startSilenceTimer, fullStop]);
+
+  // Start recording
+  const startRecording = useCallback(async () => {
+    if (isRecording) return;
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      console.error("Web Speech API not supported");
+      return;
+    }
+
+    // Start audio monitoring for VAD visual feedback
+    const audioStarted = await startAudioMonitoring();
+    if (!audioStarted) {
+      console.error("Failed to start audio monitoring");
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognitionRef.current = recognition;
+    shouldRestartRef.current = true;
+    restartCountRef.current = 0;
+    
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = "ja-JP";
+
+    setupRecognitionHandlers(recognition);
 
     try {
       recognition.start();
@@ -414,7 +454,7 @@ export function ChatInput({
       console.error("Failed to start recognition:", e);
       fullStop();
     }
-  }, [isRecording, startAudioMonitoring, startSilenceTimer, fullStop]);
+  }, [isRecording, startAudioMonitoring, setupRecognitionHandlers, fullStop]);
 
   // Stop recording (manual)
   const stopRecording = useCallback(() => {
