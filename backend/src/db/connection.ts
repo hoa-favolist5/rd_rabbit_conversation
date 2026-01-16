@@ -3,7 +3,7 @@ import { config } from "../config/index.js";
 
 const { Pool } = pg;
 
-// Create connection pool
+// Create connection pool with SSL support
 export const pool = new Pool({
   host: config.database.host,
   port: config.database.port,
@@ -13,6 +13,9 @@ export const pool = new Pool({
   max: 10,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 2000,
+  ssl: config.database.sslMode === "require" || config.database.sslMode === "prefer"
+    ? { rejectUnauthorized: false }
+    : false,
 });
 
 // Test connection

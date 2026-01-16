@@ -38,6 +38,7 @@ export const config = {
     database: process.env.DB_NAME || "rabbit_movies",
     user: process.env.DB_USER || "postgres",
     password: process.env.DB_PASSWORD || "postgres",
+    sslMode: process.env.DB_SSLMODE || "prefer",
   },
 } as const;
 

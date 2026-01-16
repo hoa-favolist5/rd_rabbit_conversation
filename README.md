@@ -98,6 +98,7 @@ DB_PORT=5432
 DB_NAME=rabbit_movies
 DB_USER=postgres
 DB_PASSWORD=postgres
+DB_SSLMODE=prefer  # Options: disable, prefer, require (use 'require' for production)
 ```
 
 ### 4. データベースの起動
