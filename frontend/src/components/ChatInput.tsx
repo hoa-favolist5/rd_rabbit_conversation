@@ -6,7 +6,6 @@ import styles from "./ChatInput.module.css";
 
 interface ChatInputProps {
   onSendMessage: (text: string) => void;
-  onBargeIn?: () => void;
   status: ConversationStatus;
   disabled?: boolean;
 }
@@ -14,9 +13,16 @@ interface ChatInputProps {
 // Silence timeout - auto-submit after 1.5s of no speech
 const SILENCE_TIMEOUT_MS = 1500;
 
-// VAD (Voice Activity Detection) settings
-const VAD_ENERGY_THRESHOLD = 0.015; // Minimum energy to consider as speech (lowered for better detection)
-const VAD_CHECK_INTERVAL_MS = 50; // How often to check for voice activity (faster for responsiveness)
+// VAD (Voice Activity Detection) settings - tuned to detect human voice, not noise
+const VAD_ENERGY_THRESHOLD = 0.08; // Higher threshold to filter out background noise
+const VAD_CHECK_INTERVAL_MS = 50; // How often to check for voice activity
+const VAD_CONFIRM_FRAMES = 4; // Require 4 consecutive frames (200ms) to confirm voice
+const SPEECH_FREQ_LOW = 85; // Hz - fundamental frequency of human voice
+const SPEECH_FREQ_HIGH = 3000; // Hz - upper harmonics of speech
+const FORMANT_FREQ_LOW = 300; // Hz - first formant region
+const FORMANT_FREQ_HIGH = 1000; // Hz - primary formant region (most voice energy here)
+const MIN_SPEECH_RATIO = 0.5; // Speech band must be at least 50% of total energy
+const MIN_FORMANT_RATIO = 0.3; // Formant region must be significant portion of speech band
 
 // Web Speech API types
 interface SpeechRecognitionEvent extends Event {
@@ -65,7 +71,6 @@ declare global {
 
 export function ChatInput({
   onSendMessage,
-  onBargeIn,
   status,
   disabled,
 }: ChatInputProps) {
@@ -81,28 +86,13 @@ export function ChatInput({
   const finalTranscriptRef = useRef<string>("");
   const hasSpokenRef = useRef<boolean>(false);
   const shouldRestartRef = useRef<boolean>(false);
-  const statusRef = useRef<ConversationStatus>(status);
-  const onBargeInRef = useRef(onBargeIn);
   
-  // WebRTC AEC refs
+  // WebRTC AEC refs for VAD visual feedback
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const vadIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  const bargeInTriggeredRef = useRef<boolean>(false);
-
-  // Keep refs in sync with props
-  useEffect(() => {
-    statusRef.current = status;
-    // Reset barge-in trigger when status changes to idle
-    if (status === "idle") {
-      bargeInTriggeredRef.current = false;
-    }
-  }, [status]);
-
-  useEffect(() => {
-    onBargeInRef.current = onBargeIn;
-  }, [onBargeIn]);
+  const voiceConfirmCountRef = useRef<number>(0);
 
   // Check for browser support
   useEffect(() => {
@@ -125,15 +115,77 @@ export function ChatInput({
     }
   }, []);
 
-  // Calculate audio energy (RMS) for VAD
-  const calculateEnergy = useCallback((dataArray: Uint8Array): number => {
-    let sum = 0;
-    for (let i = 0; i < dataArray.length; i++) {
-      // Convert from 0-255 to -1 to 1
-      const normalized = (dataArray[i] - 128) / 128;
-      sum += normalized * normalized;
+  // Calculate speech-band energy with formant analysis for human voice detection
+  // Human voice has characteristic energy distribution:
+  // - Fundamental frequency (85-255Hz for adults)
+  // - Formants (resonant peaks at ~300-1000Hz, ~1000-2500Hz, ~2500-3500Hz)
+  // - Noise/music has flat or different spectral shape
+  const calculateSpeechEnergy = useCallback((analyser: AnalyserNode, frequencyData: Uint8Array): number => {
+    analyser.getByteFrequencyData(frequencyData);
+    
+    const sampleRate = analyser.context.sampleRate;
+    const binCount = analyser.frequencyBinCount;
+    const binWidth = sampleRate / (binCount * 2); // Hz per bin
+    
+    // Calculate bin indices for different frequency ranges
+    const speechLowBin = Math.floor(SPEECH_FREQ_LOW / binWidth);
+    const speechHighBin = Math.min(Math.ceil(SPEECH_FREQ_HIGH / binWidth), binCount - 1);
+    const formantLowBin = Math.floor(FORMANT_FREQ_LOW / binWidth);
+    const formantHighBin = Math.min(Math.ceil(FORMANT_FREQ_HIGH / binWidth), binCount - 1);
+    
+    // Calculate energy in speech frequency range (85-3000Hz)
+    let speechEnergy = 0;
+    let speechBinCount = 0;
+    for (let i = speechLowBin; i <= speechHighBin; i++) {
+      speechEnergy += frequencyData[i] * frequencyData[i];
+      speechBinCount++;
     }
-    return Math.sqrt(sum / dataArray.length);
+    speechEnergy = Math.sqrt(speechEnergy / speechBinCount) / 255;
+    
+    // Calculate energy in formant region (300-1000Hz) - where voice is strongest
+    let formantEnergy = 0;
+    let formantBinCount = 0;
+    for (let i = formantLowBin; i <= formantHighBin; i++) {
+      formantEnergy += frequencyData[i] * frequencyData[i];
+      formantBinCount++;
+    }
+    formantEnergy = Math.sqrt(formantEnergy / formantBinCount) / 255;
+    
+    // Calculate total energy across all frequencies
+    let totalEnergy = 0;
+    for (let i = 0; i < binCount; i++) {
+      totalEnergy += frequencyData[i] * frequencyData[i];
+    }
+    totalEnergy = Math.sqrt(totalEnergy / binCount) / 255;
+    
+    // Calculate low frequency energy (below speech - rumble/vibration)
+    const veryLowBin = Math.min(Math.floor(80 / binWidth), speechLowBin);
+    let lowFreqEnergy = 0;
+    for (let i = 0; i < veryLowBin; i++) {
+      lowFreqEnergy += frequencyData[i] * frequencyData[i];
+    }
+    lowFreqEnergy = veryLowBin > 0 ? Math.sqrt(lowFreqEnergy / veryLowBin) / 255 : 0;
+    
+    // Voice detection criteria:
+    // 1. Speech band should dominate total energy
+    const speechRatio = totalEnergy > 0 ? speechEnergy / totalEnergy : 0;
+    // 2. Formant region should be significant within speech band
+    const formantRatio = speechEnergy > 0 ? formantEnergy / speechEnergy : 0;
+    // 3. Low frequency rumble should not dominate (filters out vibrations, traffic)
+    const lowFreqRatio = totalEnergy > 0 ? lowFreqEnergy / totalEnergy : 0;
+    
+    // Check all voice characteristics
+    const hasSpeechDominance = speechRatio >= MIN_SPEECH_RATIO;
+    const hasFormantPeak = formantRatio >= MIN_FORMANT_RATIO;
+    const notLowFreqNoise = lowFreqRatio < 0.4;
+    
+    // Only return high score if all voice characteristics are met
+    if (hasSpeechDominance && hasFormantPeak && notLowFreqNoise) {
+      return speechEnergy;
+    }
+    
+    // Reduce score significantly for non-voice sounds
+    return speechEnergy * 0.1;
   }, []);
 
   // Start WebRTC-style audio monitoring with AEC
@@ -155,7 +207,6 @@ export function ChatInput({
       });
 
       mediaStreamRef.current = stream;
-      console.log("🎤 Audio stream started with AEC enabled");
 
       // Create audio context for VAD
       const audioContext = new AudioContext();
@@ -170,45 +221,30 @@ export function ChatInput({
       const source = audioContext.createMediaStreamSource(stream);
       source.connect(analyser);
 
-      // Start VAD monitoring
-      const dataArray = new Uint8Array(analyser.frequencyBinCount);
+      // Start VAD monitoring for visual feedback only
+      const frequencyData = new Uint8Array(analyser.frequencyBinCount);
+      voiceConfirmCountRef.current = 0;
       
       vadIntervalRef.current = setInterval(() => {
         if (!analyserRef.current) return;
         
-        analyserRef.current.getByteTimeDomainData(dataArray);
-        const energy = calculateEnergy(dataArray);
+        // Use frequency-based speech detection
+        const speechEnergy = calculateSpeechEnergy(analyserRef.current, frequencyData);
         
-        // Detect voice activity
-        const isVoice = energy > VAD_ENERGY_THRESHOLD;
-        setVoiceDetected(isVoice);
+        // Detect voice activity with speech-band focus
+        const isVoiceFrame = speechEnergy > VAD_ENERGY_THRESHOLD;
         
-        // Barge-in detection: If voice detected while AI is speaking
-        if (isVoice && statusRef.current === "speaking" && !bargeInTriggeredRef.current) {
-          console.log(`🎤 VAD: Voice detected during AI speech! Energy: ${energy.toFixed(4)}`);
-          bargeInTriggeredRef.current = true;
-          onBargeInRef.current?.();
-          
-          // Clear transcript to start fresh after barge-in
-          finalTranscriptRef.current = "";
-          setInterimTranscript("");
-          hasSpokenRef.current = false;
-          if (silenceTimerRef.current) {
-            clearTimeout(silenceTimerRef.current);
-            silenceTimerRef.current = null;
-          }
-          
-          // Restart speech recognition for fresh capture
-          if (recognitionRef.current) {
-            console.log("🎤 Restarting speech recognition after barge-in...");
-            try {
-              recognitionRef.current.stop();
-              // Will auto-restart via onend handler
-            } catch (e) {
-              console.error("Failed to restart recognition:", e);
-            }
-          }
+        if (isVoiceFrame) {
+          voiceConfirmCountRef.current++;
+        } else {
+          voiceConfirmCountRef.current = 0;
         }
+        
+        // Require multiple consecutive frames to confirm voice (debouncing)
+        const isConfirmedVoice = voiceConfirmCountRef.current >= VAD_CONFIRM_FRAMES;
+        setVoiceDetected(isConfirmedVoice);
+        
+        // Note: No barge-in action here - backend handles it when new message is submitted
       }, VAD_CHECK_INTERVAL_MS);
 
       return true;
@@ -216,7 +252,7 @@ export function ChatInput({
       console.error("Failed to start audio monitoring:", error);
       return false;
     }
-  }, [calculateEnergy]);
+  }, [calculateSpeechEnergy]);
 
   // Stop audio monitoring
   const stopAudioMonitoring = useCallback(() => {
@@ -224,6 +260,8 @@ export function ChatInput({
       clearInterval(vadIntervalRef.current);
       vadIntervalRef.current = null;
     }
+    
+    voiceConfirmCountRef.current = 0;
     
     if (audioContextRef.current) {
       audioContextRef.current.close();
@@ -241,7 +279,6 @@ export function ChatInput({
 
   // Full stop - completely stop recording
   const fullStop = useCallback(() => {
-    console.log("🛑 Full stop recording");
     clearSilenceTimer();
     shouldRestartRef.current = false;
     
@@ -269,7 +306,6 @@ export function ChatInput({
     hasSpokenRef.current = false;
     
     if (text) {
-      console.log(`🎤 Submitting: "${text}" (continuing to listen)`);
       onSendMessage(text);
     }
   }, [clearSilenceTimer, onSendMessage]);
@@ -280,7 +316,6 @@ export function ChatInput({
     fullStop();
     
     if (text) {
-      console.log(`🎤 Submitting: "${text}" (stopping)`);
       onSendMessage(text);
     }
   }, [fullStop, onSendMessage]);
@@ -291,7 +326,6 @@ export function ChatInput({
     
     clearSilenceTimer();
     silenceTimerRef.current = setTimeout(() => {
-      console.log(`⏱️ Silence timeout, auto-submitting...`);
       submitAndContinue();
     }, SILENCE_TIMEOUT_MS);
   }, [clearSilenceTimer, submitAndContinue]);
@@ -306,8 +340,6 @@ export function ChatInput({
       return;
     }
 
-    console.log("🎤 Starting speech recognition with AEC...");
-    
     // Start audio monitoring for VAD-based barge-in
     const audioStarted = await startAudioMonitoring();
     if (!audioStarted) {
@@ -324,7 +356,6 @@ export function ChatInput({
     recognition.lang = "ja-JP";
 
     recognition.onstart = () => {
-      console.log("🎤 Listening with AEC...");
       setIsRecording(true);
       finalTranscriptRef.current = "";
       setInterimTranscript("");
@@ -344,25 +375,8 @@ export function ChatInput({
         }
       }
 
-      // Barge-in via speech recognition (backup to VAD)
-      if ((final || interim) && statusRef.current === "speaking" && !bargeInTriggeredRef.current) {
-        console.log("🔇 Barge-in detected via speech recognition!");
-        bargeInTriggeredRef.current = true;
-        onBargeInRef.current?.();
-        
-        // Clear old transcript after barge-in to start fresh
-        finalTranscriptRef.current = "";
-        setInterimTranscript("");
-        hasSpokenRef.current = false;
-        clearSilenceTimer();
-        
-        // Don't process this result, wait for new speech
-        return;
-      }
-
       if (final) {
         finalTranscriptRef.current += final;
-        console.log(`📝 Final: "${final}"`);
       }
 
       setInterimTranscript(finalTranscriptRef.current + interim);
@@ -382,13 +396,11 @@ export function ChatInput({
     };
 
     recognition.onend = () => {
-      console.log("🎤 Recognition ended");
       if (shouldRestartRef.current && recognitionRef.current) {
-        console.log("🎤 Auto-restarting...");
         try {
           recognition.start();
         } catch (e) {
-          console.error("Failed to restart:", e);
+          console.error("Failed to restart recognition:", e);
           fullStop();
         }
       } else {
@@ -407,7 +419,6 @@ export function ChatInput({
   // Stop recording (manual)
   const stopRecording = useCallback(() => {
     if (!isRecording) return;
-    console.log("🎤 Manual stop");
     submitAndStop();
   }, [isRecording, submitAndStop]);
 

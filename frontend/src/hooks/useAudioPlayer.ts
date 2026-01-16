@@ -28,6 +28,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
   const currentChunkIndexRef = useRef(0);
   const totalChunksRef = useRef(0);
   const isPlayingQueueRef = useRef(false);
+  const isProcessingChunkRef = useRef(false); // Prevent concurrent chunk processing
 
   // Initialize AudioContext on first user interaction
   const getAudioContext = useCallback(() => {
@@ -37,7 +38,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     return audioContextRef.current;
   }, []);
 
-  // Play audio from base64 string
+  // Play audio from base64 string (for single/full audio, not chunks)
   const play = useCallback(
     async (base64Audio: string, format: string = "mp3") => {
       try {
@@ -83,6 +84,10 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
   const processNextChunk = useCallback(async () => {
     if (!isPlayingQueueRef.current) return;
     
+    // Prevent concurrent processing
+    if (isProcessingChunkRef.current) return;
+    isProcessingChunkRef.current = true;
+    
     const nextIndex = currentChunkIndexRef.current;
     const audioData = audioQueueRef.current.get(nextIndex);
     
@@ -96,6 +101,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
         totalChunksRef.current = 0;
         setIsPlaying(false);
       }
+      isProcessingChunkRef.current = false;
       return;
     }
     
@@ -104,12 +110,14 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
       audioRef.current = audio;
       
       audio.onended = () => {
+        isProcessingChunkRef.current = false;
         currentChunkIndexRef.current++;
         processNextChunk();
       };
       
       audio.onerror = () => {
         console.error(`Audio chunk ${nextIndex} failed`);
+        isProcessingChunkRef.current = false;
         currentChunkIndexRef.current++;
         processNextChunk();
       };
@@ -125,40 +133,52 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
       await audio.play();
     } catch (error) {
       console.error("Chunk playback error:", error);
+      isProcessingChunkRef.current = false;
       currentChunkIndexRef.current++;
       processNextChunk();
     }
   }, [getAudioContext]);
 
   // Queue and play audio chunks (for parallel TTS streaming)
+  // When chunk 0 arrives, it automatically stops any currently playing audio (implicit barge-in)
   const playChunk = useCallback((chunk: AudioChunk) => {
-    console.log(`🔊 Received chunk ${chunk.index}/${chunk.total - 1}`);
-    
-    // Store chunk in queue
-    audioQueueRef.current.set(chunk.index, chunk.data);
-    totalChunksRef.current = chunk.total;
-    
-    // Start playing if this is the first chunk (index 0) OR if we're not playing and have the next needed chunk
+    // Chunk 0 marks a new response - stop old audio and start fresh
     if (chunk.index === 0) {
-      // Always reset and start fresh when chunk 0 arrives
-      console.log("🔊 Starting new audio sequence from chunk 0");
+      // Stop any currently playing audio (implicit barge-in)
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+      
+      // Clear queue and reset state
+      audioQueueRef.current.clear();
+      audioQueueRef.current.set(chunk.index, chunk.data);
+      totalChunksRef.current = chunk.total;
       isPlayingQueueRef.current = true;
+      isProcessingChunkRef.current = false; // Reset processing flag
       currentChunkIndexRef.current = 0;
       setIsPlaying(true);
       processNextChunk();
-    } else if (!isPlayingQueueRef.current && audioQueueRef.current.has(currentChunkIndexRef.current)) {
-      // Resume if we were waiting for this chunk
-      console.log(`🔊 Resuming from chunk ${currentChunkIndexRef.current}`);
-      isPlayingQueueRef.current = true;
-      setIsPlaying(true);
+      return;
+    }
+    
+    // Only queue non-zero chunks if we're actively playing
+    if (!isPlayingQueueRef.current) {
+      return;
+    }
+    
+    // Add chunk to queue
+    audioQueueRef.current.set(chunk.index, chunk.data);
+    totalChunksRef.current = chunk.total;
+    
+    // If we're waiting for this chunk, try to process it
+    if (!isProcessingChunkRef.current && audioQueueRef.current.has(currentChunkIndexRef.current)) {
       processNextChunk();
     }
   }, [processNextChunk]);
 
-  // Stop audio playback (for barge-in or manual stop)
+  // Stop audio playback
   const stop = useCallback(() => {
-    console.log("🔇 AudioPlayer.stop() called");
-    
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current.currentTime = 0;
@@ -167,12 +187,11 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     
     // Clear chunk queue and reset state
     isPlayingQueueRef.current = false;
+    isProcessingChunkRef.current = false;
     audioQueueRef.current.clear();
     currentChunkIndexRef.current = 0;
     totalChunksRef.current = 0;
     setIsPlaying(false);
-    
-    console.log("🔇 AudioPlayer stopped and queue cleared");
   }, []);
 
   // Set volume (0.0 to 1.0)

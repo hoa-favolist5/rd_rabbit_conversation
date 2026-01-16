@@ -88,6 +88,8 @@ interface Session {
   isListening: boolean;
   silenceTimer: NodeJS.Timeout | null;
   transcriptionBuffer: string;  // Accumulated transcript
+  // Response cancellation (for barge-in)
+  currentResponseId: string | null;  // Track current response being processed
 }
 
 // Active sessions
@@ -528,11 +530,17 @@ function sendWorkflowTiming(
 async function processUserInput(session: Session, userText: string): Promise<void> {
   const { ws, history } = session;
   
-  // Request deduplication: prevent duplicate requests while one is in flight
-  if (session.pendingRequest) {
-    console.log(`⚠️ [${session.id.slice(0, 8)}] Ignoring duplicate request (previous still processing)`);
-    return;
+  // Generate unique response ID for this request (for barge-in cancellation)
+  const responseId = `${session.id}-${Date.now()}`;
+  
+  // Cancel any previous response by setting new responseId
+  // This will cause ongoing audio chunk sends to be skipped
+  if (session.currentResponseId) {
+    console.log(`🔇 [${session.id.slice(0, 8)}] Cancelling previous response (barge-in)`);
   }
+  session.currentResponseId = responseId;
+  
+  // Reset pendingRequest flag (allow new request to override)
   session.pendingRequest = true;
   
   const workflow = new WorkflowTimer(session.id);
@@ -601,10 +609,15 @@ async function processUserInput(session: Session, userText: string): Promise<voi
         return result;
       },
       (delta) => {
+        // Skip if response was cancelled (barge-in)
+        if (session.currentResponseId !== responseId) return;
         // Stream partial text to client for faster perceived response
         sendAssistantDelta(ws, delta, assistantMessageId);
       },
       ENABLE_PARALLEL_TTS ? (sentence, emotion) => {
+        // Skip if response was cancelled (barge-in)
+        if (session.currentResponseId !== responseId) return;
+        
         // Parallel TTS: Start synthesizing each sentence immediately
         if (sentence.length >= MIN_SENTENCE_LENGTH_FOR_TTS) {
           const idx = sentenceIndex++;
@@ -635,6 +648,8 @@ async function processUserInput(session: Session, userText: string): Promise<voi
       } : undefined,
       // onToolUse callback - send waiting signal before DB search
       () => {
+        // Skip if response was cancelled (barge-in)
+        if (session.currentResponseId !== responseId) return;
         sendWaiting(ws);
       }
     );
@@ -649,6 +664,12 @@ async function processUserInput(session: Session, userText: string): Promise<voi
       console.log("🔧 Tool used: movie search (2 API calls)");
     } else {
       console.log("⚡ No tool used: single API call");
+    }
+
+    // Check if response was cancelled (barge-in) before proceeding
+    if (session.currentResponseId !== responseId) {
+      console.log(`🔇 [${session.id.slice(0, 8)}] Response cancelled, skipping delivery`);
+      return; // Exit early, don't update history or send anything
     }
 
     // Update conversation history
@@ -689,6 +710,12 @@ async function processUserInput(session: Session, userText: string): Promise<voi
       const sendPromises = ttsQueue.map(async (promise, i) => {
         const result = await promise;
         if (result) {
+          // Check if this response is still current (not cancelled by barge-in)
+          if (session.currentResponseId !== responseId) {
+            console.log(`🔇 [${session.id.slice(0, 8)}] Skipping chunk #${result.index} (response cancelled)`);
+            return null;
+          }
+          
           // Send immediately when this chunk is ready (don't wait for earlier chunks)
           send(ws, {
             type: "audio_chunk",
@@ -742,47 +769,59 @@ async function processUserInput(session: Session, userText: string): Promise<voi
     
     // Fallback: synthesize full response if parallel TTS didn't produce audio
     if (!audioSent) {
-      console.log(`\n🔊 [${session.id.slice(0, 8)}] Sequential TTS (fallback mode)...`);
-      const seqStartTime = performance.now();
-      
-      try {
-        const audioBase64 = await synthesizeSpeechBase64(response.text, {
-          emotion: response.emotion,
-          voice: "female",
-        });
+      // Check if response was cancelled before starting sequential TTS
+      if (session.currentResponseId !== responseId) {
+        console.log(`🔇 [${session.id.slice(0, 8)}] Skipping sequential TTS (response cancelled)`);
+        workflow.endStep({ mode: "cancelled" });
+      } else {
+        console.log(`\n🔊 [${session.id.slice(0, 8)}] Sequential TTS (fallback mode)...`);
+        const seqStartTime = performance.now();
         
-        const seqDuration = Math.round(performance.now() - seqStartTime);
-        const audioKB = Math.round(audioBase64.length * 0.75 / 1024);
-        
-        console.log(`${"─".repeat(80)}`);
-        console.log(`📊 TTS Sequential Summary (${session.id.slice(0, 8)}):`);
-        console.log(`   Content: "${response.text.slice(0, 60)}${response.text.length > 60 ? "..." : ""}"`);
-        console.log(`   Chars: ${response.text.length} | Time: ${seqDuration}ms | Audio: ${audioKB}KB`);
-        console.log(`${"─".repeat(80)}\n`);
-        
-        workflow.endStep({ 
-          mode: "sequential",
-          textLength: response.text.length, 
-          durationMs: seqDuration,
-          emotion: response.emotion 
-        });
+        try {
+          const audioBase64 = await synthesizeSpeechBase64(response.text, {
+            emotion: response.emotion,
+            voice: "female",
+          });
+          
+          // Check again after TTS completes (could be cancelled during synthesis)
+          if (session.currentResponseId !== responseId) {
+            console.log(`🔇 [${session.id.slice(0, 8)}] Skipping audio send (response cancelled)`);
+            workflow.endStep({ mode: "cancelled" });
+          } else {
+            const seqDuration = Math.round(performance.now() - seqStartTime);
+            const audioKB = Math.round(audioBase64.length * 0.75 / 1024);
+            
+            console.log(`${"─".repeat(80)}`);
+            console.log(`📊 TTS Sequential Summary (${session.id.slice(0, 8)}):`);
+            console.log(`   Content: "${response.text.slice(0, 60)}${response.text.length > 60 ? "..." : ""}"`);
+            console.log(`   Chars: ${response.text.length} | Time: ${seqDuration}ms | Audio: ${audioKB}KB`);
+            console.log(`${"─".repeat(80)}\n`);
+            
+            workflow.endStep({ 
+              mode: "sequential",
+              textLength: response.text.length, 
+              durationMs: seqDuration,
+              emotion: response.emotion 
+            });
 
-        // STEP 9: Send audio data
-        workflow.startStep("STEP9_AUDIO_SEND");
-        send(ws, {
-          type: "audio",
-          data: audioBase64,
-          format: "mp3",
-        });
-        workflow.endStep({ audioSize: audioBase64.length });
-        audioSent = true;
-      } catch (ttsError) {
-        console.error("TTS error:", ttsError);
-        workflow.endStep({ error: true });
-        send(ws, {
-          type: "tts_error",
-          message: "音声生成に失敗しました",
-        });
+            // STEP 9: Send audio data
+            workflow.startStep("STEP9_AUDIO_SEND");
+            send(ws, {
+              type: "audio",
+              data: audioBase64,
+              format: "mp3",
+            });
+            workflow.endStep({ audioSize: audioBase64.length });
+            audioSent = true;
+          }
+        } catch (ttsError) {
+          console.error("TTS error:", ttsError);
+          workflow.endStep({ error: true });
+          send(ws, {
+            type: "tts_error",
+            message: "音声生成に失敗しました",
+          });
+        }
       }
     } else {
       // Mark audio send complete for parallel mode
@@ -790,24 +829,32 @@ async function processUserInput(session: Session, userText: string): Promise<voi
       workflow.endStep({ mode: "parallel_streaming" });
     }
 
-    // STEP 11: Send timing info
-    workflow.startStep("STEP11_TIMING_SEND");
-    workflow.logSummary();
-    sendWorkflowTiming(ws, workflow, response.usedTool);
-    workflow.endStep();
+    // Only send completion updates if this response is still current
+    if (session.currentResponseId === responseId) {
+      // STEP 11: Send timing info
+      workflow.startStep("STEP11_TIMING_SEND");
+      workflow.logSummary();
+      sendWorkflowTiming(ws, workflow, response.usedTool);
+      workflow.endStep();
 
-    // STEP 12: Complete
-    workflow.startStep("STEP12_COMPLETE");
-    session.status = "idle";
-    sendStatus(ws, "idle", response.emotion, "");
-    workflow.endStep();
+      // STEP 12: Complete
+      workflow.startStep("STEP12_COMPLETE");
+      session.status = "idle";
+      sendStatus(ws, "idle", response.emotion, "");
+      workflow.endStep();
+    } else {
+      console.log(`🔇 [${session.id.slice(0, 8)}] Skipping completion (response was cancelled)`);
+    }
 
   } catch (error) {
     console.error("Process input error:", error);
-    workflow.logSummary();
-    session.status = "idle";
-    sendStatus(ws, "idle", "confused", "");
-    sendError(ws, "エラーが発生しました。もう一度お試しください。");
+    // Only update status if this response is still current
+    if (session.currentResponseId === responseId) {
+      workflow.logSummary();
+      session.status = "idle";
+      sendStatus(ws, "idle", "confused", "");
+      sendError(ws, "エラーが発生しました。もう一度お試しください。");
+    }
   } finally {
     // Always reset pending flag
     session.pendingRequest = false;
@@ -884,6 +931,8 @@ export function handleConnection(ws: WebSocket): void {
     isListening: false,
     silenceTimer: null,
     transcriptionBuffer: "",
+    // Response cancellation
+    currentResponseId: null,
   };
 
   sessions.set(sessionId, session);

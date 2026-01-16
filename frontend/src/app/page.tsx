@@ -23,8 +23,14 @@ export default function Home() {
   );
 
   // Handle audio chunks for parallel TTS streaming (faster response)
+  // When chunk 0 arrives, it automatically stops old audio (implicit barge-in)
   const handleAudioChunk = useCallback(
     (chunk: { data: string; format: string; index: number; total: number; isLast: boolean }) => {
+      // Stop waiting audio when AI response arrives
+      if (chunk.index === 0 && waitingAudioRef.current) {
+        waitingAudioRef.current.pause();
+        waitingAudioRef.current = null;
+      }
       audioPlayer.playChunk(chunk);
     },
     [audioPlayer]
@@ -46,23 +52,6 @@ export default function Home() {
       console.warn(`Failed to play waiting audio #${index}:`, err);
     });
   }, []);
-
-  // Handle barge-in - user interrupts AI while it's speaking
-  const handleBargeIn = useCallback(() => {
-    console.log("🔇 Barge-in: Stopping all audio...");
-    console.log("🔇 audioPlayer.isPlaying:", audioPlayer.isPlaying);
-    
-    // Stop TTS audio
-    audioPlayer.stop();
-    console.log("🔇 Called audioPlayer.stop()");
-    
-    // Stop waiting audio
-    if (waitingAudioRef.current) {
-      waitingAudioRef.current.pause();
-      waitingAudioRef.current = null;
-      console.log("🔇 Stopped waiting audio");
-    }
-  }, [audioPlayer]);
 
   const {
     isConnected,
@@ -140,7 +129,6 @@ export default function Home() {
           <ChatHistory messages={messages} />
           <ChatInput
             onSendMessage={sendMessage}
-            onBargeIn={handleBargeIn}
             status={status}
             disabled={!isConnected}
           />
