@@ -87,13 +87,20 @@ export function ChatInput({
   const hasSpokenRef = useRef<boolean>(false);
   const shouldRestartRef = useRef<boolean>(false);
   const restartCountRef = useRef<number>(0);
+  const statusRef = useRef<ConversationStatus>(status); // Track status for echo prevention
   
-  // WebRTC AEC refs for VAD visual feedback
+  // WebRTC AEC refs for VAD-based echo prevention
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const vadIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const voiceConfirmCountRef = useRef<number>(0);
+  const realVoiceDetectedRef = useRef<boolean>(false); // Track if VAD confirmed real human voice
+
+  // Sync statusRef with prop for echo prevention
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
 
   // Check for browser support
   useEffect(() => {
@@ -216,7 +223,7 @@ export function ChatInput({
       const source = audioContext.createMediaStreamSource(stream);
       source.connect(analyser);
 
-      // Start VAD monitoring for visual feedback only
+      // Start VAD monitoring for echo prevention and visual feedback
       const frequencyData = new Uint8Array(analyser.frequencyBinCount);
       voiceConfirmCountRef.current = 0;
       
@@ -233,11 +240,18 @@ export function ChatInput({
           voiceConfirmCountRef.current++;
         } else {
           voiceConfirmCountRef.current = 0;
+          // Clear real voice flag when no voice detected
+          realVoiceDetectedRef.current = false;
         }
         
         // Require multiple consecutive frames to confirm voice (debouncing)
         const isConfirmedVoice = voiceConfirmCountRef.current >= VAD_CONFIRM_FRAMES;
         setVoiceDetected(isConfirmedVoice);
+        
+        // Set flag when real human voice confirmed (used for echo prevention)
+        if (isConfirmedVoice) {
+          realVoiceDetectedRef.current = true;
+        }
       }, VAD_CHECK_INTERVAL_MS);
 
       return true;
@@ -255,6 +269,7 @@ export function ChatInput({
     }
     
     voiceConfirmCountRef.current = 0;
+    realVoiceDetectedRef.current = false;
     
     if (audioContextRef.current) {
       audioContextRef.current.close();
@@ -291,6 +306,7 @@ export function ChatInput({
     clearSilenceTimer();
     shouldRestartRef.current = false;
     restartCountRef.current = 0;
+    realVoiceDetectedRef.current = false;
     
     cleanupRecognition();
     stopAudioMonitoring();
@@ -309,6 +325,7 @@ export function ChatInput({
     finalTranscriptRef.current = "";
     setInterimTranscript("");
     hasSpokenRef.current = false;
+    realVoiceDetectedRef.current = false; // Reset for next turn
     
     if (text) {
       onSendMessage(text);
@@ -355,6 +372,13 @@ export function ChatInput({
         } else {
           interim += result[0].transcript;
         }
+      }
+
+      // Echo prevention: If AI is speaking, only accept if VAD confirmed real human voice
+      if (statusRef.current === "speaking" && !realVoiceDetectedRef.current) {
+        // Ignore this transcript - likely echo from AI's voice through speakers
+        console.log("🔇 Ignoring transcript (echo prevention): AI is speaking, no real voice detected");
+        return;
       }
 
       if (final) {

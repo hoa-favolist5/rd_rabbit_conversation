@@ -138,12 +138,46 @@ export interface ChatResponse {
 }
 
 /**
+ * Remove excessive emojis - keep only the first emoji, remove all others
+ */
+function removeExcessiveEmojis(text: string): string {
+  // Unicode emoji regex pattern
+  const emojiRegex = /[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu;
+  
+  // Find all emojis in the text
+  const emojis = text.match(emojiRegex);
+  
+  if (!emojis || emojis.length <= 1) {
+    // No emojis or only one emoji - return as is
+    return text;
+  }
+  
+  // Keep the first emoji, remove all others
+  const firstEmoji = emojis[0];
+  const firstEmojiIndex = text.indexOf(firstEmoji);
+  
+  // Split text into: before first emoji, first emoji, and after first emoji
+  const beforeFirstEmoji = text.substring(0, firstEmojiIndex);
+  const afterFirstEmoji = text.substring(firstEmojiIndex + firstEmoji.length);
+  
+  // Remove all emojis from the "after" part
+  const cleanedAfter = afterFirstEmoji.replace(emojiRegex, '');
+  
+  // Reconstruct with only the first emoji
+  return beforeFirstEmoji + firstEmoji + cleanedAfter;
+}
+
+/**
  * Parse emotion and text from Claude's response
  */
 function parseEmotionAndText(content: string): { emotion: EmotionType; text: string } {
   const emotionMatch = content.match(/\[EMOTION:(\w+)\]/);
   const emotion = (emotionMatch?.[1] as EmotionType) || "neutral";
-  const text = content.replace(/\[EMOTION:\w+\]\n?/, "").trim();
+  let text = content.replace(/\[EMOTION:\w+\]\n?/, "").trim();
+  
+  // Remove excessive emojis (keep only first one)
+  text = removeExcessiveEmojis(text);
+  
   return { emotion, text };
 }
 
@@ -238,7 +272,7 @@ function processStreamEvent(
       
       // Send the clean text (without emotion tag) to frontend
       if (onChunk && parsed.text.length > 0) {
-        onChunk(parsed.text);
+        onChunk(removeExcessiveEmojis(parsed.text));
       }
       state.pendingText = "";
     } 
@@ -253,21 +287,23 @@ function processStreamEvent(
       
       // Send all buffered text to frontend
       if (onChunk && state.pendingText.length > 0) {
-        onChunk(state.pendingText);
+        onChunk(removeExcessiveEmojis(state.pendingText));
       }
       state.pendingText = "";
     }
     // Don't send anything until emotion tag is complete (saves bandwidth)
   } else {
     // Emotion already parsed - send delta directly (it's clean text)
-    if (onChunk) onChunk(delta);
+    if (onChunk) onChunk(removeExcessiveEmojis(delta));
     state.sentenceBuffer += delta;
   }
 
   // Emit complete sentences for parallel TTS
   if (onSentence && state.emotionParsed) {
     for (const { sentence, remaining } of extractCompleteSentences(state.sentenceBuffer)) {
-      onSentence(sentence, state.detectedEmotion);
+      // Filter emojis before TTS to avoid reading emoji descriptions
+      const cleanSentence = removeExcessiveEmojis(sentence);
+      onSentence(cleanSentence, state.detectedEmotion);
       state.sentenceBuffer = remaining;
     }
   }
@@ -279,7 +315,7 @@ function finalizeStream(
 ): { fullText: string; emotion: EmotionType } {
   // Emit remaining text as final sentence
   if (onSentence && state.sentenceBuffer.trim().length > 0) {
-    onSentence(state.sentenceBuffer.trim(), state.detectedEmotion);
+    onSentence(removeExcessiveEmojis(state.sentenceBuffer.trim()), state.detectedEmotion);
   }
   const { emotion, text } = parseEmotionAndText(state.fullText);
   return { fullText: text, emotion };
@@ -307,8 +343,8 @@ export async function chat(
     const instant = getInstantResponse(userMessage);
     if (instant) {
       console.log("⚡ Instant response (no API call)");
-      if (onChunk) onChunk(instant.text);
-      if (onSentence) onSentence(instant.text, instant.emotion);
+      if (onChunk) onChunk(removeExcessiveEmojis(instant.text));
+      if (onSentence) onSentence(removeExcessiveEmojis(instant.text), instant.emotion);
       return instant;
     }
   }
@@ -317,8 +353,8 @@ export async function chat(
   const cacheKey = useTools ? null : getCacheKey(history, userMessage);
   const cached = getCachedResponse(cacheKey);
   if (cached) {
-    if (onChunk) onChunk(cached.text);
-    if (onSentence) onSentence(cached.text, cached.emotion);
+    if (onChunk) onChunk(removeExcessiveEmojis(cached.text));
+    if (onSentence) onSentence(removeExcessiveEmojis(cached.text), cached.emotion);
     return cached;
   }
 
