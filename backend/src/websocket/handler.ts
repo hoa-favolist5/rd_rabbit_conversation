@@ -4,6 +4,8 @@ import { chat, needsMovieSearch } from "../services/claude.js";
 import { synthesizeSpeechBase64 } from "../services/azure-tts.js";
 import { searchMovies } from "../db/movies.js";
 import { startTimer } from "../utils/timer.js";
+import { transcribeStream, AudioBuffer } from "../services/transcribe.js";
+import { VoiceActivityDetector } from "../services/vad.js";
 import type {
   ConversationTurn,
   ConversationStatus,
@@ -13,6 +15,7 @@ import type {
   AssistantMessage,
   ErrorMessage,
   WSMessage,
+  TranscriptMessage,
 } from "../types/index.js";
 
 // Configuration for parallel TTS streaming (TEN Framework inspired)
@@ -20,6 +23,9 @@ const ENABLE_PARALLEL_TTS = true;
 const MIN_SENTENCE_LENGTH_FOR_TTS = 5;
 const MAX_CONCURRENT_TTS = 3;  // Limit concurrent TTS to avoid rate limiting
 const SHORT_RESPONSE_THRESHOLD = 30;  // Skip chunking for very short responses
+
+// Voice input configuration
+const SILENCE_TIMEOUT_MS = 1500;  // 1.5 seconds of silence before processing
 
 // Waiting phrases - played before database search (pre-recorded audio)
 const WAITING_PHRASES = [
@@ -76,6 +82,12 @@ interface Session {
   history: ConversationTurn[];
   status: ConversationStatus;
   pendingRequest: boolean;  // Prevent duplicate requests
+  // Audio streaming state
+  audioBuffer: AudioBuffer | null;
+  vad: VoiceActivityDetector | null;
+  isListening: boolean;
+  silenceTimer: NodeJS.Timeout | null;
+  transcriptionBuffer: string;  // Accumulated transcript
 }
 
 // Active sessions
@@ -317,6 +329,158 @@ function sendError(ws: WebSocket, errorMessage: string): void {
     message: errorMessage,
   };
   send(ws, message);
+}
+
+/**
+ * Send transcript message to client (real-time STT)
+ */
+function sendTranscript(ws: WebSocket, text: string, isFinal: boolean): void {
+  const message: TranscriptMessage = {
+    type: "transcript",
+    text,
+    isFinal,
+  };
+  send(ws, message);
+}
+
+/**
+ * Start audio streaming for a session
+ */
+async function startAudioStreaming(session: Session): Promise<void> {
+  if (session.audioBuffer) {
+    // Already streaming
+    return;
+  }
+
+  console.log(`🎙️ [${session.id.slice(0, 8)}] Starting audio streaming`);
+  
+  session.audioBuffer = new AudioBuffer();
+  session.vad = new VoiceActivityDetector({
+    silenceMinDurationMs: SILENCE_TIMEOUT_MS,
+  });
+  session.isListening = true;
+  session.transcriptionBuffer = "";
+  session.status = "listening";
+  sendStatus(session.ws, "listening", "listening", "聞いています...");
+
+  // Start transcription stream in background
+  processTranscriptionStream(session);
+}
+
+/**
+ * Process transcription stream
+ */
+async function processTranscriptionStream(session: Session): Promise<void> {
+  if (!session.audioBuffer) return;
+
+  console.log(`🎙️ [${session.id.slice(0, 8)}] Starting AWS Transcribe stream...`);
+
+  try {
+    for await (const result of transcribeStream(session.audioBuffer)) {
+      if (!session.isListening) {
+        console.log(`🎙️ [${session.id.slice(0, 8)}] Stopped listening, breaking stream`);
+        break;
+      }
+
+      if (result.transcript) {
+        // Send interim transcript to frontend
+        sendTranscript(session.ws, result.transcript, result.isFinal);
+        console.log(`📝 [${session.id.slice(0, 8)}] ${result.isFinal ? "FINAL" : "interim"}: "${result.transcript}"`);
+
+        if (result.isFinal) {
+          session.transcriptionBuffer += result.transcript;
+        }
+      }
+    }
+    console.log(`🎙️ [${session.id.slice(0, 8)}] Transcribe stream ended`);
+  } catch (error) {
+    console.error(`❌ [${session.id.slice(0, 8)}] Transcription error:`, error);
+    // Send error to frontend
+    sendError(session.ws, "音声認識エラーが発生しました");
+  }
+}
+
+/**
+ * Stop audio streaming and process final transcript
+ */
+async function stopAudioStreaming(session: Session, processTranscript: boolean = true): Promise<void> {
+  if (!session.audioBuffer) return;
+
+  console.log(`🎙️ [${session.id.slice(0, 8)}] Stopping audio streaming`);
+
+  // Clear silence timer
+  if (session.silenceTimer) {
+    clearTimeout(session.silenceTimer);
+    session.silenceTimer = null;
+  }
+
+  // Close audio buffer (stops transcription stream)
+  session.audioBuffer.close();
+  session.audioBuffer = null;
+  session.vad = null;
+  session.isListening = false;
+
+  // Process final transcript
+  if (processTranscript && session.transcriptionBuffer.trim()) {
+    const finalText = session.transcriptionBuffer.trim();
+    console.log(`📝 [${session.id.slice(0, 8)}] Processing final transcript: "${finalText}"`);
+    session.transcriptionBuffer = "";
+    
+    // Send final transcript
+    sendTranscript(session.ws, finalText, true);
+    
+    // Signal frontend to start TTFR timer (voice input processing started)
+    send(session.ws, { type: "processing_voice", text: finalText });
+    
+    // Process as text input
+    await processUserInput(session, finalText);
+  } else {
+    session.status = "idle";
+    sendStatus(session.ws, "idle", "neutral", "");
+  }
+}
+
+/**
+ * Handle incoming audio data chunk
+ */
+function handleAudioData(session: Session, base64Data: string): void {
+  if (!session.audioBuffer || !session.vad) return;
+
+  // Decode base64 to Uint8Array (this is PCM 16-bit audio)
+  const buffer = Buffer.from(base64Data, "base64");
+  const audioChunk = new Uint8Array(buffer);
+
+  // Log audio chunk info periodically (every ~1 second)
+  if (Math.random() < 0.1) {
+    console.log(`🎵 [${session.id.slice(0, 8)}] Audio chunk: ${audioChunk.length} bytes`);
+  }
+
+  // Push to audio buffer for transcription
+  session.audioBuffer.push(audioChunk);
+
+  // Process VAD to detect silence - create proper Int16Array view
+  // The audio is PCM 16-bit, so each sample is 2 bytes
+  const int16Data = new Int16Array(buffer.buffer, buffer.byteOffset, buffer.length / 2);
+  const vadResult = session.vad.processFrame(int16Data);
+
+  // Reset silence timer on speech
+  if (vadResult.state === "speech") {
+    if (session.silenceTimer) {
+      clearTimeout(session.silenceTimer);
+      session.silenceTimer = null;
+    }
+  }
+
+  // Start silence timer when silence detected
+  if (vadResult.isSpeechEnd || (vadResult.state === "silence" && session.transcriptionBuffer)) {
+    if (!session.silenceTimer) {
+      console.log(`⏱️ [${session.id.slice(0, 8)}] Silence detected, starting ${SILENCE_TIMEOUT_MS}ms timer`);
+      session.silenceTimer = setTimeout(async () => {
+        console.log(`⏱️ [${session.id.slice(0, 8)}] Silence timeout reached, processing transcript`);
+        await stopAudioStreaming(session, true);
+      }, SILENCE_TIMEOUT_MS);
+    }
+  }
 }
 
 /**
@@ -667,14 +831,24 @@ async function handleMessage(session: Session, data: string): Promise<void> {
       }
 
       case "start_listening": {
-        session.status = "listening";
-        sendStatus(session.ws, "listening", "listening", "聞いています...");
+        await startAudioStreaming(session);
         break;
       }
 
       case "stop_listening": {
-        session.status = "idle";
-        sendStatus(session.ws, "idle", "neutral", "");
+        await stopAudioStreaming(session, true);
+        break;
+      }
+
+      case "audio_data": {
+        const audioData = message.data as string;
+        if (audioData && session.isListening) {
+          handleAudioData(session, audioData);
+        } else if (audioData && !session.isListening) {
+          // Auto-start streaming if not already listening
+          await startAudioStreaming(session);
+          handleAudioData(session, audioData);
+        }
         break;
       }
 
@@ -704,6 +878,12 @@ export function handleConnection(ws: WebSocket): void {
     history: [],
     status: "idle",
     pendingRequest: false,
+    // Audio streaming state
+    audioBuffer: null,
+    vad: null,
+    isListening: false,
+    silenceTimer: null,
+    transcriptionBuffer: "",
   };
 
   sessions.set(sessionId, session);
@@ -758,6 +938,13 @@ export function handleConnection(ws: WebSocket): void {
 
   // Handle close
   ws.on("close", () => {
+    // Cleanup audio streaming
+    if (session.audioBuffer) {
+      session.audioBuffer.close();
+    }
+    if (session.silenceTimer) {
+      clearTimeout(session.silenceTimer);
+    }
     sessions.delete(sessionId);
     console.log(`📴 Client disconnected: ${sessionId}`);
   });

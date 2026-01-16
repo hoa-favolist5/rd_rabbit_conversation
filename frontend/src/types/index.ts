@@ -55,6 +55,12 @@ export interface ErrorMessage {
   message: string;
 }
 
+export interface TranscriptMessage {
+  type: "transcript";
+  text: string;
+  isFinal: boolean;
+}
+
 export interface TimingMessage {
   type: "timing";
   timings: Array<{ action: string; durationMs: number }>;

@@ -132,36 +132,47 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
 
   // Queue and play audio chunks (for parallel TTS streaming)
   const playChunk = useCallback((chunk: AudioChunk) => {
+    console.log(`🔊 Received chunk ${chunk.index}/${chunk.total - 1}`);
+    
+    // Store chunk in queue
     audioQueueRef.current.set(chunk.index, chunk.data);
     totalChunksRef.current = chunk.total;
     
-    // Start playing if this is the first chunk and we're not already playing
-    if (chunk.index === 0 && !isPlayingQueueRef.current) {
+    // Start playing if this is the first chunk (index 0) OR if we're not playing and have the next needed chunk
+    if (chunk.index === 0) {
+      // Always reset and start fresh when chunk 0 arrives
+      console.log("🔊 Starting new audio sequence from chunk 0");
       isPlayingQueueRef.current = true;
       currentChunkIndexRef.current = 0;
       setIsPlaying(true);
       processNextChunk();
     } else if (!isPlayingQueueRef.current && audioQueueRef.current.has(currentChunkIndexRef.current)) {
       // Resume if we were waiting for this chunk
+      console.log(`🔊 Resuming from chunk ${currentChunkIndexRef.current}`);
       isPlayingQueueRef.current = true;
       setIsPlaying(true);
       processNextChunk();
     }
   }, [processNextChunk]);
 
-  // Stop audio playback
+  // Stop audio playback (for barge-in or manual stop)
   const stop = useCallback(() => {
+    console.log("🔇 AudioPlayer.stop() called");
+    
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current.currentTime = 0;
       audioRef.current = null;
     }
-    // Clear chunk queue
+    
+    // Clear chunk queue and reset state
     isPlayingQueueRef.current = false;
     audioQueueRef.current.clear();
     currentChunkIndexRef.current = 0;
     totalChunksRef.current = 0;
     setIsPlaying(false);
+    
+    console.log("🔇 AudioPlayer stopped and queue cleared");
   }, []);
 
   // Set volume (0.0 to 1.0)

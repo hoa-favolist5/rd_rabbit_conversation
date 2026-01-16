@@ -46,6 +46,7 @@ interface UseWebSocketOptions {
   onAudio?: (audioData: string, format: string) => void;
   onAudioChunk?: (chunk: AudioChunk) => void;
   onWaiting?: (index: number) => void;  // Play waiting audio before DB search
+  onTranscript?: (text: string, isFinal: boolean) => void;  // Real-time transcription
 }
 
 interface UseWebSocketReturn {
@@ -58,6 +59,7 @@ interface UseWebSocketReturn {
   lastTiming: TimingInfo | null;
   workflowTiming: WorkflowTiming | null;
   sendMessage: (text: string) => void;
+  sendAudioData: (data: ArrayBuffer) => void;
   startListening: () => void;
   stopListening: () => void;
 }
@@ -67,6 +69,7 @@ export function useWebSocket({
   onAudio,
   onAudioChunk,
   onWaiting,
+  onTranscript,
 }: UseWebSocketOptions): UseWebSocketReturn {
   const [isConnected, setIsConnected] = useState(false);
   const [status, setStatus] = useState<ConversationStatus>("idle");
@@ -270,6 +273,22 @@ export function useWebSocket({
           onWaiting?.(message.index as number);
           break;
 
+        case "transcript":
+          // Real-time transcription from AWS Transcribe
+          onTranscript?.(
+            message.text as string,
+            message.isFinal as boolean
+          );
+          break;
+
+        case "processing_voice":
+          // Backend started processing voice input - start TTFR timer
+          console.log("🎤 Voice processing started, starting TTFR timer");
+          requestStartTimeRef.current = performance.now();
+          firstResponseTimeRef.current = null;
+          firstAudioTimeRef.current = null;
+          break;
+
         case "error":
           setError(message.message as string);
           break;
@@ -323,7 +342,7 @@ export function useWebSocket({
           console.log("Unknown message type:", message.type);
       }
     },
-    [generateId, onAudio, onAudioChunk, onWaiting]
+    [generateId, onAudio, onAudioChunk, onWaiting, onTranscript]
   );
 
   // Send message to server
@@ -338,6 +357,26 @@ export function useWebSocket({
         JSON.stringify({
           type: "text_input",
           text,
+        })
+      );
+    }
+  }, []);
+
+  // Send audio data (for voice input)
+  const sendAudioData = useCallback((data: ArrayBuffer) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      // Convert ArrayBuffer to base64
+      const uint8Array = new Uint8Array(data);
+      let binary = "";
+      for (let i = 0; i < uint8Array.length; i++) {
+        binary += String.fromCharCode(uint8Array[i]);
+      }
+      const base64 = btoa(binary);
+      
+      wsRef.current.send(
+        JSON.stringify({
+          type: "audio_data",
+          data: base64,
         })
       );
     }
@@ -393,6 +432,7 @@ export function useWebSocket({
     lastTiming,
     workflowTiming,
     sendMessage,
+    sendAudioData,
     startListening,
     stopListening,
   };

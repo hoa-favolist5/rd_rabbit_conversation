@@ -47,6 +47,23 @@ export default function Home() {
     });
   }, []);
 
+  // Handle barge-in - user interrupts AI while it's speaking
+  const handleBargeIn = useCallback(() => {
+    console.log("🔇 Barge-in: Stopping all audio...");
+    console.log("🔇 audioPlayer.isPlaying:", audioPlayer.isPlaying);
+    
+    // Stop TTS audio
+    audioPlayer.stop();
+    console.log("🔇 Called audioPlayer.stop()");
+    
+    // Stop waiting audio
+    if (waitingAudioRef.current) {
+      waitingAudioRef.current.pause();
+      waitingAudioRef.current = null;
+      console.log("🔇 Stopped waiting audio");
+    }
+  }, [audioPlayer]);
+
   const {
     isConnected,
     status: wsStatus,
@@ -123,6 +140,7 @@ export default function Home() {
           <ChatHistory messages={messages} />
           <ChatInput
             onSendMessage={sendMessage}
+            onBargeIn={handleBargeIn}
             status={status}
             disabled={!isConnected}
           />

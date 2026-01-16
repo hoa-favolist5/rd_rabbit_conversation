@@ -39,15 +39,21 @@ export async function* transcribeStream(
 ): AsyncGenerator<TranscribeResult> {
   const client = createClient();
 
+  console.log("🎙️ Creating AWS Transcribe stream (ja-JP, PCM, 16kHz)...");
+
   const command = new StartStreamTranscriptionCommand({
     LanguageCode: "ja-JP",
     MediaEncoding: "pcm",
     MediaSampleRateHertz: 16000,
     AudioStream: audioChunkGenerator(audioStream),
+    // Enable partial results for real-time feedback
+    EnablePartialResultsStabilization: true,
+    PartialResultsStability: "medium",
   });
 
   try {
     const response = await client.send(command);
+    console.log("🎙️ AWS Transcribe stream connected, SessionId:", response.SessionId);
 
     if (!response.TranscriptResultStream) {
       throw new Error("No transcript stream returned");
@@ -58,16 +64,27 @@ export async function* transcribeStream(
         for (const result of event.TranscriptEvent.Transcript.Results) {
           if (result.Alternatives && result.Alternatives.length > 0) {
             const transcript = result.Alternatives[0].Transcript || "";
-            yield {
-              transcript,
-              isFinal: !result.IsPartial,
-            };
+            if (transcript) {
+              yield {
+                transcript,
+                isFinal: !result.IsPartial,
+              };
+            }
           }
         }
       }
     }
-  } catch (error) {
-    console.error("Transcribe error:", error);
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error("❌ Transcribe error:", errorMessage);
+    
+    // Check for common errors
+    if (errorMessage.includes("Credentials")) {
+      console.error("⚠️ AWS credentials may be missing or invalid. Check AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY");
+    } else if (errorMessage.includes("region")) {
+      console.error("⚠️ AWS region may be incorrect. Check AWS_REGION");
+    }
+    
     throw error;
   } finally {
     client.destroy();
