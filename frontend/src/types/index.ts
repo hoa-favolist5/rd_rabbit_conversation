@@ -48,6 +48,7 @@ export interface AudioMessage {
   type: "audio";
   data: string; // base64 encoded
   format: string;
+  responseId?: string; // Track which response this audio belongs to
 }
 
 export interface ErrorMessage {
@@ -65,6 +66,13 @@ export interface TimingMessage {
   type: "timing";
   timings: Array<{ action: string; durationMs: number }>;
   totalMs: number;
+}
+
+export interface LongWaitingMessage {
+  type: "long_waiting";
+  audio: string; // base64 encoded audio
+  text: string;  // The waiting phrase text
+  responseId?: string; // Track which response this waiting audio belongs to
 }
 
 export interface ConnectedMessage {

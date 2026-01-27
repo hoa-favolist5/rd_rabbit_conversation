@@ -5,6 +5,7 @@ import { WebSocketServer } from "ws";
 import { config, validateConfig } from "./config/index.js";
 import { handleConnection, getSessionCount } from "./websocket/handler.js";
 import { testConnection } from "./db/connection.js";
+import { logger } from "./utils/logger.js";
 
 // Validate configuration
 validateConfig();
@@ -47,54 +48,54 @@ const wss = new WebSocketServer({
 // Handle WebSocket connections
 wss.on("connection", (ws, req) => {
   const clientIp = req.socket.remoteAddress;
-  console.log(`🔌 New WebSocket connection from ${clientIp}`);
+  logger.info(`New WebSocket connection from ${clientIp}`);
   handleConnection(ws);
 });
 
 // Start server
 async function start() {
-  console.log("🐰 Starting Rabbit AI Avatar Server...");
-  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+  logger.info("Starting Rabbit AI Avatar Server...");
+  logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
   // Test database connection
   const dbConnected = await testConnection();
   if (!dbConnected) {
-    console.log("⚠️  Database not available. Movie search will return empty results.");
-    console.log("   Run 'npm run db:setup' after setting up PostgreSQL.");
+    logger.warn("Database not available. Movie search will return empty results.");
+    logger.warn("Run 'npm run db:setup' after setting up PostgreSQL.");
   }
 
   // Start HTTP server
   server.listen(config.port, () => {
-    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    console.log(`🚀 Server running on http://localhost:${config.port}`);
-    console.log(`🔌 WebSocket available at ws://localhost:${config.port}/ws`);
-    console.log(`🌐 CORS origin: ${config.corsOrigin}`);
-    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    console.log("Ready to accept connections! 🎉");
+    logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    logger.info(`Server running on http://localhost:${config.port}`);
+    logger.info(`WebSocket available at ws://localhost:${config.port}/ws`);
+    logger.info(`CORS origin: ${config.corsOrigin}`);
+    logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    logger.info("Ready to accept connections!");
   });
 }
 
 // Handle graceful shutdown
 process.on("SIGTERM", () => {
-  console.log("\n👋 Shutting down gracefully...");
+  logger.info("Shutting down gracefully...");
   wss.close();
   server.close(() => {
-    console.log("Server closed");
+    logger.info("Server closed");
     process.exit(0);
   });
 });
 
 process.on("SIGINT", () => {
-  console.log("\n👋 Shutting down gracefully...");
+  logger.info("Shutting down gracefully...");
   wss.close();
   server.close(() => {
-    console.log("Server closed");
+    logger.info("Server closed");
     process.exit(0);
   });
 });
 
 // Start the server
 start().catch((error) => {
-  console.error("Failed to start server:", error);
+  logger.error("Failed to start server", error);
   process.exit(1);
 });

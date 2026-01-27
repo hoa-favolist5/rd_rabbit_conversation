@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Rabbit AI Avatar",
+  title: "Rabbit Favolist5",
   description: "AI Live Conversation Avatar - ラビットAIアシスタント",
 };
 

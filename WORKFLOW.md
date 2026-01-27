@@ -88,17 +88,108 @@
                                          │
                                          ▼
 ┌──────────────────────────────────────────────────────────────────────────────────┐
-│  STEP 4.5: Waiting Signal (Tool Use検出時)                                        │
+│  STEP 4.5: Two-Tier Waiting System (Short + Long)                               │
 │  ┌────────────────────────────────────────────────────────────────────────────┐  │
-│  │  When Claude returns tool_use → onToolUse callback triggered               │  │
-│  │  ↓                                                                          │  │
-│  │  Backend sends: { type: "waiting", index: 5, text: "了解。ちょっと待ってね。" }│  │
-│  │  ↓                                                                          │  │
-│  │  Frontend plays pre-recorded audio: /waiting/{index}.mp3                   │  │
-│  │  ↓                                                                          │  │
-│  │  User hears: "了解。ちょっと待ってね。" while DB search runs                 │  │
+│  │  [TWO-TIER INTELLIGENT WAITING SYSTEM]                                      │  │
 │  │                                                                             │  │
-│  │  [20 waiting phrases available - randomly selected]                         │  │
+│  │  TIER 1: SHORT WAITING (> 1s) - Quick Acknowledgment                       │  │
+│  │  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  │  │
+│  │  Purpose: Brief feedback when response takes longer than expected          │  │
+│  │  Trigger: Backend does NOT respond within NEXT_PUBLIC_WAITING_THRESHOLD    │  │
+│  │           (threshold exceeded, > 1s)                                        │  │
+│  │  Audio: /waiting-short/0-9.mp3 (10 sounds)                                 │  │
+│  │  Examples: "ああ" (ah), "うん" (un), "えっと" (etto), "なるほど"          │  │
+│  │  Duration: < 1 second each                                                  │  │
+│  │  Behavior: Protected playback, must complete before backend audio          │  │
+│  │                                                                             │  │
+│  │  TIER 2: LONG WAITING - Server-Side Context-Aware Confirmation             │  │
+│  │  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  │  │
+│  │  SERVER-SIDE - Database Query Confirmation (NEW!)                          │  │
+│  │     Trigger: Tool use detected (database search)                            │  │
+│  │     Generation: Real-time TTS with context                                  │  │
+│  │     Examples:                                                               │  │
+│  │       - "アクション映画ですね、今探していますので少々お待ちください。"    │  │
+│  │       - "2020年の作品ですね、データベースを確認しています。"              │  │
+│  │       - "少々お待ちください、今すぐ探してみますね。"                       │  │
+│  │     Features:                                                               │  │
+│  │       ✓ Confirms user's request (query, genre, year)                       │  │
+│  │       ✓ Streams immediately when tool use starts                           │  │
+│  │       ✓ Gives progress feedback during slow operations                     │  │
+│  │                                                                             │  │
+│  │  [FLOW DIAGRAM]                                                             │  │
+│  │                                                                             │  │
+│  │  1. User submits message → Backend starts processing                       │  │
+│  │     ↓                                                                       │  │
+│  │  2. Frontend starts 1s timer                                                │  │
+│  │     ↓                                                                       │  │
+│  │  3. Decision Tree:                                                          │  │
+│  │     ┌───────────────────────────────────────────────────────────────┐      │  │
+│  │     │ IF backend responds within 1s (fast):                         │      │  │
+│  │     │   → NO waiting sound                                           │      │  │
+│  │     │   → Play backend response immediately                          │      │  │
+│  │     │                                                                │      │  │
+│  │     │ IF backend responds after 1s (slow) WITHOUT tool use:         │      │  │
+│  │     │   → Play SHORT waiting sound: "ああ", "うん", "えっと"        │      │  │
+│  │     │   → Protected playback (must complete)                         │      │  │
+│  │     │   → After completion + 500ms delay                             │      │  │
+│  │     │   → Play backend response                                      │      │  │
+│  │     │                                                                │      │  │
+│  │     │ IF backend uses database tool (any time):                     │      │  │
+│  │     │   → Backend sends LONG waiting with context immediately       │      │  │
+│  │     │      Example: "アクション映画ですね、今探しています。"        │      │  │
+│  │     │   → Cancels client-side short waiting if not yet triggered    │      │  │
+│  │     │   → Plays confirmation + performs database search             │      │  │
+│  │     │   → Sends final search results                                │      │  │
+│  │     └───────────────────────────────────────────────────────────────┘      │  │
+│  │                                                                             │  │
+│  │  [CONFIGURATION - Environment Variables]                                    │  │
+│  │  - NEXT_PUBLIC_WAITING_THRESHOLD: Time before playing waiting phrase (1s)  │  │
+│  │  - NEXT_PUBLIC_POST_WAITING_DELAY: Delay after waiting phrase (0.5s)       │  │
+│  │                                                                             │  │
+│  │  [FEATURES]                                                                 │  │
+│  │  ✓ 10 short waiting sounds (for slow responses > 1s)                       │  │
+│  │  ✓ Fast responses (< 1s) play immediately with no waiting                  │  │
+│  │  ✓ Server-side context-aware waiting (database operations)                 │  │
+│  │  ✓ Confirms user's search query in natural language                        │  │
+│  │  ✓ Protected short sounds ensure smooth transitions                        │  │
+│  │  ✓ Post-waiting delay (500ms) prevents audio overlap                       │  │
+│  │  ✓ Intelligent timing based on response speed                              │  │
+│  │                                                                             │  │
+│  │  [TIMING DIAGRAMS]                                                          │  │
+│  │                                                                             │  │
+│  │  Scenario A: Fast Response (< 1s) - NO Waiting Sound                       │  │
+│  │  ┌──────────────────────────────────────────────────────────────┐          │  │
+│  │  │  0ms         800ms                                            │          │  │
+│  │  │  │           │                                                │          │  │
+│  │  │  ●───────────●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━│          │  │
+│  │  │  │           │                                                │          │  │
+│  │  │  Submit      Response Arrives                                │          │  │
+│  │  │              → Play immediately (NO waiting sound)           │          │  │
+│  │  └──────────────────────────────────────────────────────────────┘          │  │
+│  │                                                                             │  │
+│  │  Scenario B: Database Query - Server LONG Waiting                          │  │
+│  │  ┌──────────────────────────────────────────────────────────────┐          │  │
+│  │  │  0ms     200ms          2500ms         4000ms                │          │  │
+│  │  │  │       │              │              │                      │          │  │
+│  │  │  ●───────●──────────────●──────────────●━━━━━━━━━━━━━━━━━━│          │  │
+│  │  │  │       │              │              │                      │          │  │
+│  │  │  Submit  Tool Detected  DB Search      Final Response        │          │  │
+│  │  │          → Send: "アクション映画ですね、今探しています。"   │          │  │
+│  │  │          (Long waiting with context)                         │          │  │
+│  │  │                         (Searching...)                       │          │  │
+│  │  └──────────────────────────────────────────────────────────────┘          │  │
+│  │                                                                             │  │
+│  │  Scenario C: Slow Response (> 1s) - SHORT Waiting Sound                    │  │
+│  │  ┌──────────────────────────────────────────────────────────────┐          │  │
+│  │  │  0ms         1000ms  1800ms  2300ms       3000ms             │          │  │
+│  │  │  │           │      │       │            │                   │          │  │
+│  │  │  ●───────────●──────●───────●────────────●━━━━━━━━━━━━━━━━│          │  │
+│  │  │  │           │      │       │            │                   │          │  │
+│  │  │  Submit      Threshold Short Phrase      Backend             │          │  │
+│  │  │              Play   Ends   +500ms        Response            │          │  │
+│  │  │              Short  (Protected)          Plays               │          │  │
+│  │  │              "ああ"                                          │          │  │
+│  │  └──────────────────────────────────────────────────────────────┘          │  │
 │  └────────────────────────────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────────────────────────┘
                                          │
@@ -712,6 +803,10 @@ const SHORT_RESPONSE_THRESHOLD = 30;        // Skip chunking for short responses
 
 // Frontend Configuration
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:3001/ws";
+
+// Waiting Phrase Configuration (.env.local)
+const NEXT_PUBLIC_WAITING_THRESHOLD = 1000;     // Time (ms) before playing waiting phrase
+const NEXT_PUBLIC_POST_WAITING_DELAY = 500;     // Delay (ms) after waiting phrase completes
 ```
 
 ---

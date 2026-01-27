@@ -67,6 +67,15 @@ export interface AudioChunkMessage extends WSMessage {
   index: number;
   total: number;
   isLast: boolean;
+  responseId?: string; // Track which response this chunk belongs to
+}
+
+// Long waiting audio - streamed during database operations
+export interface LongWaitingMessage extends WSMessage {
+  type: "long_waiting";
+  audio: string; // base64 encoded audio
+  text: string;  // The waiting phrase text
+  responseId?: string; // Track which response this waiting audio belongs to
 }
 
 // Control messages from client

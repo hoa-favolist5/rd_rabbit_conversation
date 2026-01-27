@@ -1,12 +1,15 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { createLogger } from "@/utils/logger";
 import type {
   WSMessage,
   ConversationStatus,
   EmotionType,
   ChatMessage,
 } from "@/types";
+
+const log = createLogger("WebSocket");
 
 // Workflow step timing
 export interface WorkflowStep {
@@ -39,14 +42,16 @@ interface AudioChunk {
   index: number;
   total: number;
   isLast: boolean;
+  responseId?: string;  // Used to identify which response this chunk belongs to
 }
 
 interface UseWebSocketOptions {
   url: string;
-  onAudio?: (audioData: string, format: string) => void;
+  onAudio?: (audioData: string, format: string, responseId?: string, isProtected?: boolean) => void;
   onAudioChunk?: (chunk: AudioChunk) => void;
   onWaiting?: (index: number) => void;  // Play waiting audio before DB search
   onTranscript?: (text: string, isFinal: boolean) => void;  // Real-time transcription
+  onBackendResponse?: () => void;  // Called when any backend response arrives (text or audio)
 }
 
 interface UseWebSocketReturn {
@@ -70,6 +75,7 @@ export function useWebSocket({
   onAudioChunk,
   onWaiting,
   onTranscript,
+  onBackendResponse,
 }: UseWebSocketOptions): UseWebSocketReturn {
   const [isConnected, setIsConnected] = useState(false);
   const [status, setStatus] = useState<ConversationStatus>("idle");
@@ -101,29 +107,29 @@ export function useWebSocket({
       return;
     }
 
-    console.log("Connecting to WebSocket:", url);
+    log.debug("Connecting to WebSocket:", url);
     const ws = new WebSocket(url);
 
     ws.onopen = () => {
-      console.log("WebSocket connected");
+      log.debug("WebSocket connected");
       setIsConnected(true);
       setError(null);
     };
 
     ws.onclose = () => {
-      console.log("WebSocket disconnected");
+      log.debug("WebSocket disconnected");
       setIsConnected(false);
       wsRef.current = null;
 
       // Attempt to reconnect after 3 seconds
       reconnectTimeoutRef.current = setTimeout(() => {
-        console.log("Attempting to reconnect...");
+        log.debug("Attempting to reconnect...");
         connect();
       }, 3000);
     };
 
     ws.onerror = (event) => {
-      console.error("WebSocket error:", event);
+      log.error("WebSocket error:", event);
       setError("接続エラーが発生しました");
     };
 
@@ -132,7 +138,7 @@ export function useWebSocket({
         const message = JSON.parse(event.data) as WSMessage;
         handleMessage(message);
       } catch (err) {
-        console.error("Failed to parse message:", err);
+        log.error("Failed to parse message:", err);
       }
     };
 
@@ -144,7 +150,7 @@ export function useWebSocket({
     (message: WSMessage) => {
       switch (message.type) {
         case "connected":
-          console.log("Connected:", message.message);
+          log.debug("Connected:", message.message);
           break;
 
         case "status":
@@ -215,7 +221,9 @@ export function useWebSocket({
           if (requestStartTimeRef.current && !firstResponseTimeRef.current) {
             firstResponseTimeRef.current = performance.now();
             const ttfr = Math.round(firstResponseTimeRef.current - requestStartTimeRef.current);
-            console.log(`⚡ Time to First Response: ${ttfr}ms`);
+            log.debug(`⚡ Time to First Response: ${ttfr}ms`);
+            // Notify that backend responded (cancel waiting timer)
+            onBackendResponse?.();
           }
 
           setMessages((prev) => {
@@ -246,9 +254,13 @@ export function useWebSocket({
           if (requestStartTimeRef.current && !firstAudioTimeRef.current) {
             firstAudioTimeRef.current = performance.now();
             const ttfa = Math.round(firstAudioTimeRef.current - requestStartTimeRef.current);
-            console.log(`🔊 Time to First Audio: ${ttfa}ms`);
+            log.debug(`🔊 Time to First Audio: ${ttfa}ms`);
           }
-          onAudio?.(message.data as string, message.format as string);
+          // Log audio arrival with responseId
+          const audioResponseId = message.responseId as string | undefined;
+          log.debug(`📨 Received full audio message (responseId: ${audioResponseId ? audioResponseId.slice(-8) : 'none'})`);
+          // Pass audio with responseId for validation
+          onAudio?.(message.data as string, message.format as string, audioResponseId);
           break;
 
         case "audio_chunk":
@@ -256,7 +268,9 @@ export function useWebSocket({
           if (requestStartTimeRef.current && !firstAudioTimeRef.current) {
             firstAudioTimeRef.current = performance.now();
             const ttfa = Math.round(firstAudioTimeRef.current - requestStartTimeRef.current);
-            console.log(`🔊 Time to First Audio Chunk: ${ttfa}ms`);
+            log.debug(`🔊 Time to First Audio Chunk: ${ttfa}ms`);
+            // Notify that backend responded (cancel waiting timer if not already cancelled)
+            onBackendResponse?.();
           }
           onAudioChunk?.({
             data: message.data as string,
@@ -264,13 +278,30 @@ export function useWebSocket({
             index: message.index as number,
             total: message.total as number,
             isLast: message.isLast as boolean,
+            responseId: message.responseId as string | undefined,
           });
           break;
 
         case "waiting":
-          // Play pre-recorded waiting audio before DB search
-          console.log(`⏳ Waiting signal received: #${message.index}`);
+          // Play pre-recorded waiting audio before DB search (DEPRECATED)
+          log.debug(`⏳ Waiting signal received: #${message.index}`);
           onWaiting?.(message.index as number);
+          break;
+
+        case "long_waiting":
+          // Server-streamed long waiting audio (for database queries)
+          const longWaitingResponseId = message.responseId as string | undefined;
+          log.debug(`⏳ Long waiting received: "${message.text}" (responseId: ${longWaitingResponseId ? longWaitingResponseId.slice(-8) : 'none'})`);
+          // Record time to first audio (this counts as audio response)
+          if (requestStartTimeRef.current && !firstAudioTimeRef.current) {
+            firstAudioTimeRef.current = performance.now();
+            const ttfa = Math.round(firstAudioTimeRef.current - requestStartTimeRef.current);
+            log.debug(`🔊 Time to Long Waiting Audio: ${ttfa}ms`);
+            // Notify that backend responded
+            onBackendResponse?.();
+          }
+          // Play the long waiting audio immediately with responseId and PROTECTED flag
+          onAudio?.(message.audio as string, "mp3", longWaitingResponseId, true);
           break;
 
         case "transcript":
@@ -283,7 +314,7 @@ export function useWebSocket({
 
         case "processing_voice":
           // Backend started processing voice input - start TTFR timer
-          console.log("🎤 Voice processing started, starting TTFR timer");
+          log.debug("🎤 Voice processing started, starting TTFR timer");
           requestStartTimeRef.current = performance.now();
           firstResponseTimeRef.current = null;
           firstAudioTimeRef.current = null;
@@ -339,10 +370,10 @@ export function useWebSocket({
           break;
 
         default:
-          console.log("Unknown message type:", message.type);
+          log.debug("Unknown message type:", message.type);
       }
     },
-    [generateId, onAudio, onAudioChunk, onWaiting, onTranscript]
+    [generateId, onAudio, onAudioChunk, onWaiting, onTranscript, onBackendResponse]
   );
 
   // Send message to server

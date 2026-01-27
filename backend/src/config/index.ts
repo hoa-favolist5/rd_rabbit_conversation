@@ -1,6 +1,7 @@
 import dotenv from "dotenv";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
+import { logger } from "../utils/logger.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -25,12 +26,6 @@ export const config = {
     apiKey: process.env.ANTHROPIC_API_KEY || "",
   },
 
-  // Azure Speech
-  azure: {
-    speechKey: process.env.AZURE_SPEECH_KEY || "",
-    speechRegion: process.env.AZURE_SPEECH_REGION || "japaneast",
-  },
-
   // PostgreSQL
   database: {
     host: process.env.DB_HOST || "localhost",
@@ -39,6 +34,15 @@ export const config = {
     user: process.env.DB_USER || "postgres",
     password: process.env.DB_PASSWORD || "postgres",
     sslMode: process.env.DB_SSLMODE || "prefer",
+  },
+
+  // Google Services
+  google: {
+    apiKey: process.env.GOOGLE_API_KEY || "",
+    searchEngineId: process.env.GOOGLE_SEARCH_ENGINE_ID || "",
+    // Google Cloud TTS
+    cloudApiKey: process.env.GOOGLE_CLOUD_API_KEY || process.env.GOOGLE_API_KEY || "",
+    ttsVoice: process.env.GOOGLE_TTS_VOICE || "ja-JP-Neural2-B",
   },
 } as const;
 
@@ -49,12 +53,9 @@ export function validateConfig(): void {
   if (!config.anthropic.apiKey) {
     missing.push("ANTHROPIC_API_KEY");
   }
-  if (!config.azure.speechKey) {
-    missing.push("AZURE_SPEECH_KEY");
-  }
 
   if (missing.length > 0) {
-    console.warn(`⚠️  Missing environment variables: ${missing.join(", ")}`);
-    console.warn("Some features may not work correctly.");
+    logger.warn(`Missing environment variables: ${missing.join(", ")}`);
+    logger.warn("Some features may not work correctly.");
   }
 }

@@ -2,6 +2,10 @@
  * Performance timing utility for tracking action durations
  */
 
+import { createLogger } from "./logger.js";
+
+const logger = createLogger("Timer");
+
 export interface TimingResult {
   action: string;
   durationMs: number;
@@ -73,15 +77,8 @@ export function logTiming(
     details,
   };
 
-  // Color-coded console output based on duration
-  const color = durationMs < 500 ? "\x1b[32m" : durationMs < 2000 ? "\x1b[33m" : "\x1b[31m";
-  const reset = "\x1b[0m";
-  const sessionPrefix = sessionId ? `[${sessionId.slice(0, 8)}]` : "";
-
-  console.log(
-    `${color}⏱️  ${sessionPrefix} ${action}: ${durationMs}ms${reset}`,
-    details ? JSON.stringify(details) : ""
-  );
+  const sessionPrefix = sessionId ? `[${sessionId.slice(0, 8)}] ` : "";
+  logger.debug(`${sessionPrefix}${action}: ${durationMs}ms`);
 }
 
 /**
@@ -169,14 +166,9 @@ export class ConversationTimer {
    */
   logSummary(): void {
     const summary = this.getSummary();
-    console.log("\n📊 Conversation Turn Summary:");
-    console.log(`   Session: ${this.sessionId.slice(0, 8)}`);
-    console.log(`   Total: ${summary.totalDurationMs}ms`);
-    console.log("   Breakdown:");
-    for (const timing of this.timings) {
-      const percentage = ((timing.durationMs / summary.totalDurationMs) * 100).toFixed(1);
-      console.log(`     - ${timing.action}: ${timing.durationMs}ms (${percentage}%)`);
-    }
-    console.log("");
+    const breakdown = this.timings
+      .map(t => `${t.action}: ${t.durationMs}ms`)
+      .join(", ");
+    logger.debug(`[${this.sessionId.slice(0, 8)}] Turn: ${summary.totalDurationMs}ms | ${breakdown}`);
   }
 }
