@@ -37,18 +37,16 @@ export function ChatInput({
   
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  // Check for AWS Transcribe support (requires getUserMedia)
+  // Check for microphone support (getUserMedia)
   useEffect(() => {
     if (typeof window !== "undefined") {
       const hasMediaDevices = !!navigator?.mediaDevices?.getUserMedia;
-      const hasAWSConfig = !!(
-        process.env.NEXT_PUBLIC_AWS_ACCESS_KEY_ID &&
-        process.env.NEXT_PUBLIC_AWS_SECRET_ACCESS_KEY
-      );
-      setIsMicSupported(hasMediaDevices && hasAWSConfig);
+      setIsMicSupported(hasMediaDevices);
       
-      if (!hasAWSConfig) {
-        log.warn("AWS credentials not configured. Please set NEXT_PUBLIC_AWS_ACCESS_KEY_ID and NEXT_PUBLIC_AWS_SECRET_ACCESS_KEY");
+      if (!hasMediaDevices) {
+        log.warn("MediaDevices API not supported in this browser");
+      } else {
+        log.debug("Microphone support detected");
       }
     }
   }, []);
@@ -174,7 +172,7 @@ export function ChatInput({
         </button>
       )}
 
-      {/* Error display for AWS Transcribe */}
+      {/* Error display for Speech Recognition */}
       {transcribeError && (
         <div className={styles.transcribeError}>
           <div style={{ marginBottom: '8px' }}>
@@ -183,9 +181,10 @@ export function ChatInput({
           <div style={{ fontSize: '12px', opacity: 0.8 }}>
             💡 Common fixes:
             <ul style={{ margin: '4px 0', paddingLeft: '20px' }}>
-              <li>Verify AWS credentials in .env.local</li>
-              <li>Check IAM user has AmazonTranscribeFullAccess policy</li>
-              <li>Test credentials: <code>node test-aws-credentials.js</code></li>
+              <li>Check backend is running: <code>npm run dev:backend</code></li>
+              <li>Verify AWS credentials in backend/.env</li>
+              <li>Test STS endpoint: <code>curl http://localhost:3001/api/transcribe/sts-token</code></li>
+              <li>Check browser console for detailed errors</li>
               <li>Refresh page and try again</li>
             </ul>
           </div>

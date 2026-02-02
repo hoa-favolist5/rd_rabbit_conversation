@@ -31,22 +31,35 @@ export async function combinedMovieSearch(
   genre?: string,
   year?: number
 ): Promise<CombinedSearchResult> {
-  log.debug(`Combined search: "${query}"${genre ? ` genre:${genre}` : ""}${year ? ` year:${year}` : ""}`);
+  log.debug(`🔍 Database search: "${query}"${genre ? ` genre:${genre}` : ""}${year ? ` year:${year}` : ""}`);
 
   const startTime = performance.now();
 
-  // Run both searches in parallel
-  const [dbResults, googleResults] = await Promise.all([
-    searchMovies(query, genre, year),
-    searchGoogle(query),
-  ]);
+  // DISABLED: Google search - focus only on database
+  // Run database search only
+  const dbResults = await searchMovies(query, genre, year);
+  
+  // Empty Google results (disabled)
+  const googleResults: GoogleSearchResponse = {
+    results: [],
+    total: 0,
+    source: "google",
+  };
 
   const duration = Math.round(performance.now() - startTime);
 
-  // Merge and format results
+  // Format database results only
   const merged = formatCombinedResults(dbResults, googleResults);
 
-  log.debug(`Combined search complete: ${duration}ms | DB: ${dbResults.total} | Google: ${googleResults.total}`);
+  // Log detailed results summary
+  if (dbResults.total > 0) {
+    const topMovies = dbResults.movies.slice(0, 3).map(m => 
+      `"${m.title_ja}"${m.release_year ? ` (${m.release_year})` : ""}`
+    ).join(", ");
+    log.debug(`✅ Database search complete: ${duration}ms | Found ${dbResults.total} results: ${topMovies}${dbResults.total > 3 ? ` +${dbResults.total - 3} more` : ""}`);
+  } else {
+    log.debug(`❌ Database search complete: ${duration}ms | No results found`);
+  }
 
   return {
     dbResults,
@@ -57,7 +70,7 @@ export async function combinedMovieSearch(
 
 /**
  * Format combined results for LLM consumption
- * Prioritizes DB results but supplements with Google for additional context
+ * Database results only (Google search disabled)
  */
 function formatCombinedResults(
   dbResults: MovieSearchResult,
@@ -82,14 +95,20 @@ function formatCombinedResults(
       return parts.join(" ");
     });
     sections.push(`【データベース検索結果】\n${dbMovies.join("\n")}`);
+    
+    // Log what's being sent to LLM
+    const titles = dbResults.movies.slice(0, 3).map(m => m.title_ja).join(", ");
+    const more = dbResults.movies.length > 3 ? ` +${dbResults.movies.length - 3} more` : "";
+    log.debug(`📤 Formatted ${dbResults.movies.length} results for LLM: ${titles}${more}`);
   } else {
     sections.push("【データベース検索結果】\n該当なし");
+    log.debug(`📤 No results to format for LLM`);
   }
 
-  // Google results section
-  if (googleResults.results.length > 0) {
-    sections.push(formatGoogleResults(googleResults));
-  }
+  // DISABLED: Google results section (focus only on database)
+  // if (googleResults.results.length > 0) {
+  //   sections.push(formatGoogleResults(googleResults));
+  // }
 
   return sections.join("\n\n");
 }

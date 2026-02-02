@@ -13,17 +13,21 @@ import { dirname } from "path";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-const DEBUG = process.env.DEBUG === "true";
+// Use function to check DEBUG at runtime (not at module load time)
+// This ensures dotenv.config() has already run
+const isDebugEnabled = () => process.env.DEBUG === "true";
 const LOGS_DIR = path.join(__dirname, "../../logs");
 
-// Session ID context for file logging
-let currentSessionId: string | null = null;
+// User ID context for file logging (instead of session ID)
+let currentUserId: string | null = null;
 
-// Ensure logs directory exists
-if (DEBUG) {
+// Ensure logs directory exists (will be created on first log write)
+function ensureLogsDir() {
+  if (!isDebugEnabled()) return;
   try {
     if (!fs.existsSync(LOGS_DIR)) {
       fs.mkdirSync(LOGS_DIR, { recursive: true });
+      console.log(`[Logger] Created logs directory: ${LOGS_DIR}`);
     }
   } catch (error) {
     console.error("Failed to create logs directory:", error);
@@ -35,42 +39,55 @@ type LogLevel = "debug" | "info" | "warn" | "error";
 interface LogOptions {
   prefix?: string;
   data?: unknown;
-  sessionId?: string;  // Optional session ID for this specific log
+  userId?: string;  // Optional user ID for this specific log
 }
 
 function formatMessage(level: LogLevel, message: string, options?: LogOptions): string {
   const timestamp = new Date().toISOString();
   const prefix = options?.prefix ? `[${options.prefix}] ` : "";
-  const sessionPrefix = options?.sessionId ? `[${options.sessionId.slice(0, 8)}] ` : "";
-  return `${timestamp} [${level.toUpperCase()}] ${sessionPrefix}${prefix}${message}`;
+  const userPrefix = options?.userId ? `[User: ${options.userId}] ` : "";
+  return `${timestamp} [${level.toUpperCase()}] ${userPrefix}${prefix}${message}`;
 }
 
 /**
- * Write log message to session-specific file
+ * Write log message to user-specific file (appends to existing file)
  */
 function writeToFile(level: LogLevel, message: string, options?: LogOptions): void {
-  if (!DEBUG) return;
+  const debugEnabled = isDebugEnabled();
+  
+  if (!debugEnabled) {
+    // Don't spam console, just skip silently
+    return;
+  }
 
-  const sessionId = options?.sessionId || currentSessionId;
-  if (!sessionId) return;
+  const userId = options?.userId || currentUserId;
+  if (!userId) {
+    // This is normal - logs without user context are skipped
+    return;
+  }
 
   try {
-    const logFile = path.join(LOGS_DIR, `${sessionId}.log`);
+    // Ensure logs directory exists
+    ensureLogsDir();
+    
+    // Use userid-xxx.log format
+    const logFile = path.join(LOGS_DIR, `userid-${userId}.log`);
     const formattedMessage = formatMessage(level, message, options);
     const logLine = options?.data !== undefined 
       ? `${formattedMessage}\n${JSON.stringify(options.data, null, 2)}\n`
       : `${formattedMessage}\n`;
     
+    // fs.appendFileSync automatically appends to existing file or creates new one
     fs.appendFileSync(logFile, logLine, "utf8");
   } catch (error) {
-    // Silently fail - don't disrupt application flow
-    console.error("Failed to write to log file:", error);
+    // Log error to help debug
+    console.error(`[Logger] ❌ Failed to write to log file:`, error);
   }
 }
 
 export const logger = {
   debug(message: string, options?: LogOptions): void {
-    if (DEBUG) {
+    if (isDebugEnabled()) {
       console.log(formatMessage("debug", message, options));
       if (options?.data !== undefined) {
         console.log(options.data);
@@ -80,7 +97,7 @@ export const logger = {
   },
 
   info(message: string, options?: LogOptions): void {
-    if (DEBUG) {
+    if (isDebugEnabled()) {
       console.log(formatMessage("info", message, options));
       if (options?.data !== undefined) {
         console.log(options.data);
@@ -90,7 +107,7 @@ export const logger = {
   },
 
   warn(message: string, options?: LogOptions): void {
-    if (DEBUG) {
+    if (isDebugEnabled()) {
       console.warn(formatMessage("warn", message, options));
       if (options?.data !== undefined) {
         console.warn(options.data);
@@ -100,7 +117,7 @@ export const logger = {
   },
 
   error(message: string, options?: LogOptions): void {
-    if (DEBUG) {
+    if (isDebugEnabled()) {
       console.error(formatMessage("error", message, options));
       if (options?.data !== undefined) {
         console.error(options.data);
@@ -111,55 +128,55 @@ export const logger = {
 };
 
 /**
- * Set the current session ID for logging context
- * Call this when a new WebSocket connection is established
+ * Set the current user ID for logging context
+ * Call this when user authentication is established
  */
-export function setSessionId(sessionId: string): void {
-  currentSessionId = sessionId;
+export function setUserId(userId: string): void {
+  currentUserId = userId;
 }
 
 /**
- * Clear the current session ID
+ * Clear the current user ID
  * Call this when a WebSocket connection is closed
  */
-export function clearSessionId(): void {
-  currentSessionId = null;
+export function clearUserId(): void {
+  currentUserId = null;
 }
 
 /**
- * Get the current session ID
+ * Get the current user ID
  */
-export function getSessionId(): string | null {
-  return currentSessionId;
+export function getUserId(): string | null {
+  return currentUserId;
 }
 
 // Convenience function to create a prefixed logger
 export function createLogger(prefix: string) {
   return {
-    debug: (message: string, data?: unknown, sessionId?: string) => 
-      logger.debug(message, { prefix, data, sessionId: sessionId || currentSessionId || undefined }),
-    info: (message: string, data?: unknown, sessionId?: string) => 
-      logger.info(message, { prefix, data, sessionId: sessionId || currentSessionId || undefined }),
-    warn: (message: string, data?: unknown, sessionId?: string) => 
-      logger.warn(message, { prefix, data, sessionId: sessionId || currentSessionId || undefined }),
-    error: (message: string, data?: unknown, sessionId?: string) => 
-      logger.error(message, { prefix, data, sessionId: sessionId || currentSessionId || undefined }),
+    debug: (message: string, data?: unknown, userId?: string) => 
+      logger.debug(message, { prefix, data, userId: userId || currentUserId || undefined }),
+    info: (message: string, data?: unknown, userId?: string) => 
+      logger.info(message, { prefix, data, userId: userId || currentUserId || undefined }),
+    warn: (message: string, data?: unknown, userId?: string) => 
+      logger.warn(message, { prefix, data, userId: userId || currentUserId || undefined }),
+    error: (message: string, data?: unknown, userId?: string) => 
+      logger.error(message, { prefix, data, userId: userId || currentUserId || undefined }),
   };
 }
 
 /**
- * Create a session-specific logger
- * Use this to ensure all logs from a session go to the same file
+ * Create a user-specific logger
+ * Use this to ensure all logs from a user go to the same file
  */
-export function createSessionLogger(prefix: string, sessionId: string) {
+export function createUserLogger(prefix: string, userId: string) {
   return {
     debug: (message: string, data?: unknown) => 
-      logger.debug(message, { prefix, data, sessionId }),
+      logger.debug(message, { prefix, data, userId }),
     info: (message: string, data?: unknown) => 
-      logger.info(message, { prefix, data, sessionId }),
+      logger.info(message, { prefix, data, userId }),
     warn: (message: string, data?: unknown) => 
-      logger.warn(message, { prefix, data, sessionId }),
+      logger.warn(message, { prefix, data, userId }),
     error: (message: string, data?: unknown) => 
-      logger.error(message, { prefix, data, sessionId }),
+      logger.error(message, { prefix, data, userId }),
   };
 }

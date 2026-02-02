@@ -41,6 +41,26 @@ export interface AssistantMessage extends WSMessage {
   type: "assistant_message";
   text: string;
   emotion: EmotionType;
+  messageId?: string;
+  domain?: DomainType;
+  archiveItem?: ArchiveItemInfo;  // Structured item info for archiving
+  searchResults?: SearchResults;  // All search results (movies or gourmet)
+}
+
+// Search results for displaying all items found
+export interface SearchResults {
+  type: "movie" | "gourmet";
+  movies?: Movie[];
+  restaurants?: GourmetRestaurant[];
+  total: number;
+}
+
+// Archive item information (for saving to archive)
+export interface ArchiveItemInfo {
+  itemId: string;       // Actual movie/gourmet ID (not messageId)
+  itemTitle: string;    // Movie title or restaurant name
+  itemDomain: DomainType;
+  itemData?: Record<string, unknown>;  // Additional metadata
 }
 
 export interface ErrorMessage extends WSMessage {
@@ -92,15 +112,69 @@ export interface TextInputMessage extends WSMessage {
   text: string;
 }
 
+export interface SetUserInfoMessage extends WSMessage {
+  type: "set_user_info";
+  userId?: string;
+  userName?: string;
+  userToken?: string;
+}
+
+// Save to archive message
+export interface SaveArchiveMessage extends WSMessage {
+  type: "save_archive";
+  userId: string;
+  domain: DomainType;
+  itemId: string;
+  itemTitle?: string;
+  itemData?: Record<string, unknown>;
+}
+
+// Load conversation history message
+export interface LoadHistoryMessage extends WSMessage {
+  type: "load_history";
+  userId: string;
+  limit?: number;
+}
+
+// History loaded response
+export interface HistoryLoadedMessage extends WSMessage {
+  type: "history_loaded";
+  history: ConversationTurn[];
+}
+
+// Request greeting message
+export interface RequestGreetingMessage extends WSMessage {
+  type: "request_greeting";
+}
+
+// Domain types for conversation context
+export type DomainType = "movie" | "gourmet" | "general";
+
 // Conversation history
 export interface ConversationTurn {
   role: "user" | "assistant";
   content: string;
+  domain?: DomainType;
+  emotion?: EmotionType;
+}
+
+// Database conversation history record
+export interface ConversationHistoryRecord {
+  id: number;
+  session_id: string;
+  user_id?: string;
+  user_name?: string;
+  user_token?: string;
+  role: "user" | "assistant";
+  content: string;
+  domain: DomainType;
+  emotion?: string;
+  created_at: Date;
 }
 
 // Movie database types
 export interface Movie {
-  id: number;
+  id: number | null;
   title_ja: string;
   title_en: string | null;
   description: string | null;
@@ -116,11 +190,40 @@ export interface MovieSearchResult {
   total: number;
 }
 
+// Gourmet restaurant database types
+export interface GourmetRestaurant {
+  id: number | null;
+  code: string | null;
+  name: string;
+  name_short: string | null;
+  address: string | null;
+  lat: number | null;
+  lng: number | null;
+  catch_copy: string | null;
+  capacity: number | null;
+  access: string | null;
+  urls_pc: string | null;
+  open_hours: string | null;
+  close_days: string | null;
+  budget_id: number | null;
+}
+
+export interface GourmetSearchResult {
+  restaurants: GourmetRestaurant[];
+  total: number;
+}
+
 // Claude tool types
 export interface MovieSearchInput {
   query: string;
   genre?: string;
   year?: number;
+}
+
+export interface GourmetSearchInput {
+  query: string;
+  area?: string;
+  cuisine?: string;
 }
 
 // Azure TTS types

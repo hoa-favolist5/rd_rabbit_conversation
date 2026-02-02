@@ -16,13 +16,14 @@ class AudioCaptureProcessor extends AudioWorkletProcessor {
     this.targetSampleRate = 16000; // AWS Transcribe requires 16kHz
 
     // Target output size in samples at the TARGET rate (16kHz).
-    // 512 samples @ 16kHz = 32ms — low latency while keeping
-    // postMessage frequency reasonable (~31/s).
-    this.TARGET_OUTPUT_SAMPLES = 512;
+    // 1024 samples @ 16kHz = 64ms — better speech context for recognition
+    // while still maintaining reasonable latency (~15 chunks/s).
+    // Larger chunks give AWS Transcribe more context for Japanese phonemes.
+    this.TARGET_OUTPUT_SAMPLES = 1024;
 
     // Pre-allocated ring buffer for raw audio at SOURCE sample rate.
-    // Sized for up to 4:1 ratio (e.g. 64kHz→16kHz) plus one extra frame.
-    this.ringBuffer = new Float32Array(this.TARGET_OUTPUT_SAMPLES * 4 + 256);
+    // Sized for up to 4:1 ratio (e.g. 64kHz→16kHz) plus extra frames for safety.
+    this.ringBuffer = new Float32Array(this.TARGET_OUTPUT_SAMPLES * 4 + 512);
     this.writePos = 0;
 
     // Listen for messages from main thread
@@ -46,9 +47,9 @@ class AudioCaptureProcessor extends AudioWorkletProcessor {
   }
 
   /**
-   * Resample audio using linear interpolation.
-   * Called on the entire buffered batch (not per-frame), so there are
-   * no discontinuities at frame boundaries.
+   * Resample audio using 4-point cubic interpolation (Catmull-Rom).
+   * Better quality than linear interpolation - reduces aliasing artifacts
+   * that can confuse speech recognition.
    */
   resampleAudio(samples, sourceSampleRate, targetSampleRate) {
     if (sourceSampleRate === targetSampleRate) {
@@ -61,13 +62,25 @@ class AudioCaptureProcessor extends AudioWorkletProcessor {
 
     for (let i = 0; i < newLength; i++) {
       const srcIndex = i * ratio;
-      const srcIndexFloor = Math.floor(srcIndex);
-      const srcIndexCeil = Math.min(srcIndexFloor + 1, samples.length - 1);
-      const fraction = srcIndex - srcIndexFloor;
+      const idx = Math.floor(srcIndex);
+      const frac = srcIndex - idx;
 
-      resampled[i] =
-        samples[srcIndexFloor] * (1 - fraction) +
-        samples[srcIndexCeil] * fraction;
+      // Get 4 surrounding samples (with boundary clamping)
+      const s0 = samples[Math.max(0, idx - 1)];
+      const s1 = samples[idx];
+      const s2 = samples[Math.min(samples.length - 1, idx + 1)];
+      const s3 = samples[Math.min(samples.length - 1, idx + 2)];
+
+      // Catmull-Rom cubic interpolation
+      const a0 = -0.5 * s0 + 1.5 * s1 - 1.5 * s2 + 0.5 * s3;
+      const a1 = s0 - 2.5 * s1 + 2.0 * s2 - 0.5 * s3;
+      const a2 = -0.5 * s0 + 0.5 * s2;
+      const a3 = s1;
+
+      resampled[i] = a0 * frac * frac * frac + a1 * frac * frac + a2 * frac + a3;
+
+      // Clamp to prevent overflow
+      resampled[i] = Math.max(-1, Math.min(1, resampled[i]));
     }
 
     return resampled;

@@ -24,14 +24,106 @@ async function setup() {
     `);
     console.log("✅ Created movies table");
 
-    // Create indexes
+    // Create indexes for movies
     await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_movies_title_ja ON movies(title_ja);
       CREATE INDEX IF NOT EXISTS idx_movies_genre ON movies USING GIN(genre);
       CREATE INDEX IF NOT EXISTS idx_movies_year ON movies(release_year);
       CREATE INDEX IF NOT EXISTS idx_movies_rating ON movies(rating DESC);
     `);
-    console.log("✅ Created indexes");
+    console.log("✅ Created movies indexes");
+
+    // Create conversation_history table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS conversation_history (
+        id SERIAL PRIMARY KEY,
+        session_id VARCHAR(255) NOT NULL,
+        user_id VARCHAR(255),
+        user_name VARCHAR(255),
+        user_token TEXT,
+        role VARCHAR(20) NOT NULL CHECK (role IN ('user', 'assistant')),
+        content TEXT NOT NULL,
+        domain VARCHAR(50) NOT NULL DEFAULT 'movie',
+        emotion VARCHAR(20),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log("✅ Created conversation_history table");
+
+    // Create indexes for conversation_history
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_conversation_session_id ON conversation_history(session_id);
+      CREATE INDEX IF NOT EXISTS idx_conversation_user_id ON conversation_history(user_id);
+      CREATE INDEX IF NOT EXISTS idx_conversation_domain ON conversation_history(domain);
+      CREATE INDEX IF NOT EXISTS idx_conversation_created_at ON conversation_history(created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_conversation_session_domain ON conversation_history(session_id, domain);
+      CREATE INDEX IF NOT EXISTS idx_conversation_user_domain ON conversation_history(user_id, domain);
+    `);
+    console.log("✅ Created conversation_history indexes");
+
+    // Create user_profile table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS user_profile (
+        id SERIAL PRIMARY KEY,
+        users_id INTEGER NOT NULL UNIQUE,
+        name VARCHAR(255),
+        contact_email_address VARCHAR(255),
+        nick_name VARCHAR(255),
+        birthday DATE,
+        gender VARCHAR(50),
+        nationality VARCHAR(100),
+        prefecture VARCHAR(100),
+        district VARCHAR(100),
+        image_url VARCHAR(500),
+        is_feature INTEGER,
+        introduction TEXT,
+        twitter_url VARCHAR(500),
+        instagram_url VARCHAR(500),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        deleted_at TIMESTAMP,
+        is_push INTEGER DEFAULT 1,
+        facebook_url VARCHAR(500),
+        read_nickname VARCHAR(255),
+        first_setup_notice INTEGER DEFAULT 0,
+        user_search TEXT,
+        province VARCHAR(100)
+      )
+    `);
+    console.log("✅ Created user_profile table");
+
+    // Create indexes for user_profile
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_user_profile_users_id ON user_profile(users_id);
+      CREATE INDEX IF NOT EXISTS idx_user_profile_email ON user_profile(contact_email_address);
+      CREATE INDEX IF NOT EXISTS idx_user_profile_nick_name ON user_profile(nick_name);
+      CREATE INDEX IF NOT EXISTS idx_user_profile_created_at ON user_profile(created_at DESC);
+    `);
+    console.log("✅ Created user_profile indexes");
+
+    // Create user_archive table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS user_archive (
+        id SERIAL PRIMARY KEY,
+        user_id VARCHAR(255) NOT NULL,
+        domain VARCHAR(50) NOT NULL CHECK (domain IN ('movie', 'gourmet', 'general')),
+        item_id VARCHAR(255) NOT NULL,
+        item_title VARCHAR(500),
+        item_data JSONB,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, domain, item_id)
+      )
+    `);
+    console.log("✅ Created user_archive table");
+
+    // Create indexes for user_archive
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_user_archive_user_id ON user_archive(user_id);
+      CREATE INDEX IF NOT EXISTS idx_user_archive_domain ON user_archive(domain);
+      CREATE INDEX IF NOT EXISTS idx_user_archive_user_domain ON user_archive(user_id, domain);
+      CREATE INDEX IF NOT EXISTS idx_user_archive_created_at ON user_archive(created_at DESC);
+    `);
+    console.log("✅ Created user_archive indexes");
 
     // Check if we have sample data
     const countResult = await pool.query("SELECT COUNT(*) FROM movies");

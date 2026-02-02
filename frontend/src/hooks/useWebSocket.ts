@@ -2,11 +2,15 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { createLogger } from "@/utils/logger";
+import archiveStorage from "@/utils/archiveStorage";
 import type {
   WSMessage,
   ConversationStatus,
   EmotionType,
   ChatMessage,
+  DomainType,
+  SaveArchiveMessage,
+  FriendMatch,
 } from "@/types";
 
 const log = createLogger("WebSocket");
@@ -63,10 +67,16 @@ interface UseWebSocketReturn {
   error: string | null;
   lastTiming: TimingInfo | null;
   workflowTiming: WorkflowTiming | null;
+  userId: string | null;
+  historyLoaded: boolean;
   sendMessage: (text: string) => void;
   sendAudioData: (data: ArrayBuffer) => void;
   startListening: () => void;
   stopListening: () => void;
+  requestRandomUser: () => void;
+  loadHistory: (userId: string, limit?: number) => void;
+  requestGreeting: () => void;
+  saveToArchive: (userId: string, domain: DomainType, itemId: string, itemTitle?: string, itemData?: Record<string, unknown>) => void;
 }
 
 export function useWebSocket({
@@ -85,6 +95,8 @@ export function useWebSocket({
   const [error, setError] = useState<string | null>(null);
   const [lastTiming, setLastTiming] = useState<TimingInfo | null>(null);
   const [workflowTiming, setWorkflowTiming] = useState<WorkflowTiming | null>(null);
+  const [userId, setUserId] = useState<string | null>(null);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -167,24 +179,35 @@ export function useWebSocket({
               role: "user",
               content: message.text as string,
               timestamp: new Date(),
+              domain: message.domain as DomainType | undefined,
             },
           ]);
           break;
 
         case "assistant_message": {
           const messageId = message.messageId as string | undefined;
+          const archiveItem = message.archiveItem as any;
+          const searchResults = message.searchResults as any;
+          
           if (messageId) {
+            // Update existing message or add new one with messageId
             setMessages((prev) => {
               const index = prev.findIndex((m) => m.id === messageId);
               if (index >= 0) {
+                // Update existing message
                 const updated = [...prev];
                 updated[index] = {
                   ...updated[index],
                   content: message.text as string,
                   emotion: message.emotion as EmotionType,
+                  domain: message.domain as DomainType | undefined,
+                  messageId,
+                  archiveItem,
+                  searchResults,
                 };
                 return updated;
               }
+              // Add new message with messageId
               return [
                 ...prev,
                 {
@@ -193,22 +216,29 @@ export function useWebSocket({
                   content: message.text as string,
                   emotion: message.emotion as EmotionType,
                   timestamp: new Date(),
+                  domain: message.domain as DomainType | undefined,
+                  messageId,
+                  archiveItem,
+                  searchResults,
                 },
               ];
             });
-            break;
+          } else {
+            // Add new message without messageId (generate one)
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: generateId(),
+                role: "assistant",
+                content: message.text as string,
+                emotion: message.emotion as EmotionType,
+                timestamp: new Date(),
+                domain: message.domain as DomainType | undefined,
+                archiveItem,
+                searchResults,
+              },
+            ]);
           }
-
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: generateId(),
-              role: "assistant",
-              content: message.text as string,
-              emotion: message.emotion as EmotionType,
-              timestamp: new Date(),
-            },
-          ]);
           break;
         }
 
@@ -365,6 +395,53 @@ export function useWebSocket({
           break;
         }
 
+        case "archive_saved":
+          log.debug(`✅ Archive saved: ${message.domain}/${message.itemId}`);
+          // Update archiveStorage (single source of truth)
+          // Components using useArchiveStorage hook will auto re-render
+          if (message.friends_matched && Array.isArray(message.friends_matched)) {
+            archiveStorage.updateItem(
+              message.itemId as string,
+              message.domain as DomainType,
+              {
+                savedAt: new Date(),
+                friendsMatched: message.friends_matched as FriendMatch[],
+              }
+            );
+            log.debug(`👥 Friends matched: ${(message.friends_matched as FriendMatch[]).length}`);
+          }
+          break;
+
+        case "user_info_set":
+          if (message.success && message.user) {
+            const user = message.user as { userId: number; nickName: string };
+            setUserId(user.userId.toString());
+            log.debug(`👤 User set: ${user.nickName} (ID: ${user.userId})`);
+          }
+          break;
+
+        case "history_loaded": {
+          const historyMsg = message as any;
+          if (historyMsg.history && Array.isArray(historyMsg.history)) {
+            log.info(`📜 Loaded ${historyMsg.history.length} history items`);
+            
+            // Convert history to chat messages (silently, no audio)
+            const historyMessages: ChatMessage[] = historyMsg.history.map((turn: any, index: number) => ({
+              id: `history-${index}-${Date.now()}`,
+              role: turn.role,
+              content: turn.content,
+              emotion: turn.emotion,
+              timestamp: new Date(),
+              domain: turn.domain,
+            }));
+            
+            setMessages(historyMessages);
+            setHistoryLoaded(true);
+            log.debug("✅ History loaded and displayed");
+          }
+          break;
+        }
+
         case "pong":
           // Heartbeat response
           break;
@@ -427,6 +504,74 @@ export function useWebSocket({
     }
   }, []);
 
+  // Request random user from backend
+  const requestRandomUser = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      log.debug("🎲 Requesting random user from backend");
+      wsRef.current.send(
+        JSON.stringify({
+          type: "set_user_info",
+        })
+      );
+    } else {
+      log.warn("⚠️ Cannot request user: WebSocket not connected");
+    }
+  }, []);
+
+  // Load conversation history for user
+  const loadHistory = useCallback((userId: string, limit: number = 5) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      log.debug(`📜 Requesting ${limit} history items for user ${userId}`);
+      wsRef.current.send(
+        JSON.stringify({
+          type: "load_history",
+          userId,
+          limit,
+        })
+      );
+    } else {
+      log.warn("⚠️ Cannot load history: WebSocket not connected");
+    }
+  }, []);
+
+  // Request greeting from backend
+  const requestGreeting = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      log.debug("👋 Requesting greeting from backend");
+      wsRef.current.send(
+        JSON.stringify({
+          type: "request_greeting",
+        })
+      );
+    } else {
+      log.warn("⚠️ Cannot request greeting: WebSocket not connected");
+    }
+  }, []);
+
+  // Save to archive
+  const saveToArchive = useCallback((
+    userId: string,
+    domain: DomainType,
+    itemId: string,
+    itemTitle?: string,
+    itemData?: Record<string, unknown>
+  ) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      log.debug(`📚 Saving to archive: ${domain}/${itemId}`);
+      const message: SaveArchiveMessage = {
+        type: "save_archive",
+        userId,
+        domain,
+        itemId,
+        itemTitle,
+        itemData,
+      };
+      wsRef.current.send(JSON.stringify(message));
+    } else {
+      log.warn("⚠️ Cannot save to archive: WebSocket not connected");
+    }
+  }, []);
+
   // Connect on mount
   useEffect(() => {
     connect();
@@ -440,6 +585,25 @@ export function useWebSocket({
         wsRef.current.close();
       }
     };
+  }, [connect]);
+
+  // Reconnect when app returns to foreground (iOS PWA)
+  useEffect(() => {
+    const handler = () => {
+      if (document.visibilityState === "visible") {
+        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+          log.debug("App foregrounded — reconnecting WebSocket");
+          // Clear any pending reconnect timer
+          if (reconnectTimeoutRef.current) {
+            clearTimeout(reconnectTimeoutRef.current);
+            reconnectTimeoutRef.current = null;
+          }
+          connect();
+        }
+      }
+    };
+    document.addEventListener("visibilitychange", handler);
+    return () => document.removeEventListener("visibilitychange", handler);
   }, [connect]);
 
   // Heartbeat to keep connection alive
@@ -462,9 +626,15 @@ export function useWebSocket({
     error,
     lastTiming,
     workflowTiming,
+    userId,
+    historyLoaded,
     sendMessage,
     sendAudioData,
     startListening,
     stopListening,
+    requestRandomUser,
+    loadHistory,
+    requestGreeting,
+    saveToArchive,
   };
 }

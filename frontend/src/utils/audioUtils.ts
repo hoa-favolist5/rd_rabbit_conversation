@@ -131,8 +131,8 @@ export const DEFAULT_AUDIO_CONFIG: AudioCaptureConfig = {
   sampleRate: 16000, // AWS Transcribe requires 16kHz for Japanese
   channelCount: 1, // Mono
   echoCancellation: true,
-  noiseSuppression: true,
-  autoGainControl: true,
+  noiseSuppression: true, // Use browser's native for better Japanese recognition
+  autoGainControl: true, // Helps normalize volume for consistent recognition
 };
 
 // 🔧 QUICK TOGGLE: Set to false to disable RNNoise if it affects Japanese transcription
@@ -164,12 +164,16 @@ export class AudioCaptureManager {
     // Note: Don't specify sampleRate — let browser use native hardware rate
     // to avoid browser-internal resampling latency. The AudioWorklet handles
     // resampling to 16kHz for AWS Transcribe.
+    // Optimized for Japanese speech recognition
     this.mediaStream = await navigator.mediaDevices.getUserMedia({
       audio: {
         channelCount: this.config.channelCount,
         echoCancellation: this.config.echoCancellation,
         noiseSuppression: this.useRNNoise ? false : this.config.noiseSuppression, // Use browser's if RNNoise disabled
         autoGainControl: this.config.autoGainControl,
+        // Additional constraints for better voice capture
+        // Note: latency: 0 can cause audio dropout - use 'interactive' hint instead
+        sampleSize: 16, // 16-bit audio for better quality
       },
     });
 

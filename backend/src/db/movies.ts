@@ -54,9 +54,10 @@ export async function searchMovies(
     log.debug(`Movie search: "${query}" -> [${searchTerms.join(", ")}]`);
 
     // Query the production table data_archive_movie_master
-    // Columns: title, overview, release_date, vote_average
+    // Columns: id, title, overview, release_date, vote_average
     let sql = `
       SELECT
+        id,
         title,
         overview,
         release_date,
@@ -110,6 +111,16 @@ export async function searchMovies(
       movies,
       total: movies.length,
     };
+    
+    // Log search results summary
+    if (movies.length > 0) {
+      const titles = movies.slice(0, 3).map(m => m.title_ja).join(", ");
+      const more = movies.length > 3 ? ` +${movies.length - 3} more` : "";
+      log.debug(`✅ Found ${movies.length} movies: ${titles}${more}`);
+    } else {
+      log.debug(`❌ No movies found for query: "${query}"`);
+    }
+    
     setCachedResult(cacheKey, response);
     return response;
   } catch (error) {

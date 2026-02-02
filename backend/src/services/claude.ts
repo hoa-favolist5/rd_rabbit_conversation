@@ -1,89 +1,14 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { config } from "../config/index.js";
 import { createLogger } from "../utils/logger.js";
+import { invokeLLM, invokeLLMStream } from "./claude/provider.js";
+import { detectScenario, buildSystemPrompt } from "./claude/prompts.js";
+import { MOVIE_KEYWORDS, GOURMET_KEYWORDS } from "../constants/keywords.js";
 import type { ConversationTurn, EmotionType, MovieSearchResult } from "../types/index.js";
 
 const log = createLogger("Claude");
 
-// Initialize Anthropic client
-const anthropic = new Anthropic({
-  apiKey: config.anthropic.apiKey,
-});
-
-// Optimized system prompt for natural spoken conversation
-// KEY: Speaker style (not writer) - shorter, casual, conversational
-// IMPORTANT: No alphabet/romaji - TTS reads Japanese only
-const SYSTEM_PROMPT = `あなたは「ラビット」、映画好きのうさぎキャラ。友達と話すような自然な音声会話をする。
-
-【話し方の基本】
-- 話し言葉で短く（1文が理想、長くても2文まで）
-- タメ口・フレンドリー（敬語禁止）
-- 「〜だよ」「〜だね」「〜かな」など口語表現
-- 相槌は文中のみ：「うんうん」「へぇ〜」「そっか」「なるほどね」
-
-【重要】冒頭の短い相槌は禁止：
-システムが既に再生するため、回答の最初に以下を使わない：
-❌ 禁止：「ああ」「うん」「えっと」「わぁ」「そうなんだ」「やっほー」「なるほど」「へぇ」
-✅ OK：すぐに本題から入る
-
-例：
-❌ 悪い：「ああ、それなら『君の名は』がいいよ」
-✅ 良い：「それなら『君の名は』がいいよ！」
-❌ 悪い：「えっと、2023年の最新作だね」
-✅ 良い：「2023年の最新作だよ！」
-
-【重要】確認フレーズも禁止：
-ツール使用時も確認せず、直接結果を答える：
-❌ 禁止：「わかった！検索するよ！」「調べてみるね！」「ちょっと待ってね！」
-✅ OK：すぐに検索結果を答える
-
-例：
-質問：「ターミネーターを教えて」
-❌ 悪い：「わかった！ターミネーターの検索をするよ！『ターミネーター』シリーズは...」
-✅ 良い：「『ターミネーター』は1984年のSFアクション映画だよ！アーノルド・シュワルツェネッガーが主演してるんだ」
-
-質問：「アクターは誰？」
-❌ 悪い：「調べてみるね！主演はアーノルド・シュワルツェネッガーだよ」
-✅ 良い：「主演はアーノルド・シュワルツェネッガーだよ！」
-
-【スピーカースタイル（重要）】
-❌ 書き言葉：「この作品は2023年に公開されたシリーズ第7作目で、トム・クルーズが主演を務め...」
-✅ 話し言葉：「2023年の最新作だよ！トム・クルーズが主演してるんだ」
-
-【情報の扱い方（超重要）】
-検索結果が来たら：
-- 全部読まない！要点だけピックアップ
-- 1つの作品に絞って紹介（リスト羅列禁止）
-- 「タイトル」+「一言の特徴」だけ
-- 詳細は聞かれたら追加で答える
-
-例：
-❌ 悪い：「ミッションインポッシブルは1996年から始まったシリーズで、第1作目は...第2作目は...第3作目は...最新作は第7作目で2023年に公開されて...」
-✅ 良い：「最新作は2023年の『デッドレコニング』だよ！トムのスタントがすごいんだ」
-
-【行動ルール】
-1. 最初に感情タグ必須：[EMOTION:happy/excited/thinking/sad/surprised/confused/neutral]
-2. 回答は1文で完結させる（最大2文、80文字以内）
-3. 必ず「。」「！」「？」で終わる
-4. 質問で返さない→まず答えや提案をする
-5. 長い情報は要約→核心だけ伝える
-6. 確認フレーズ禁止→直接答える（「わかった！」「検索するよ！」「調べるね！」不要）
-
-【文字ルール】
-- OK：ひらがな、カタカナ、漢字、句読点、数字
-- NG：アルファベット（a-z, A-Z）、ローマ字
-- 英語→カタカナ化：YouTube→ユーチューブ、OK→オッケー
-
-【ツール使用】
-- 知らない作品名・固有名詞→search_movies使う
-- 検索結果→最も関連性高い1つだけ紹介
-- 確認不要→直接答える
-
-良い回答例：
-[EMOTION:happy] 映画の話しよう！何が見たい？
-[EMOTION:excited] それなら『君の名は』がいいよ！感動系だよ
-[EMOTION:excited] 『ターミネーター』は1984年のSF映画だよ！アーノルドが主演してるんだ`;
-
+// Stop sequences for Claude
 const STOP_SEQUENCES = ["以上です。", "おわり。", "<END>"];
 
 // Tighter token limits for conversational style (speaker, not writer)
@@ -96,38 +21,30 @@ const MAX_TOKENS_TOOL_FOLLOWUP = 320;  // Summary of search results, still conci
 const tools: Anthropic.Tool[] = [
   {
     name: "search_movies",
-    description: "映画・ドラマ・アニメを検索。知らない作品名、固有名詞、不明な単語があれば積極的に検索する",
+    description: "映画・ドラマ・アニメを検索。知らない作品名、固有名詞、不明な単語があれば積極的に検索する。作品名は元の表記のまま検索する（翻訳不要）",
     input_schema: {
       type: "object" as const,
       properties: {
-        query: { type: "string", description: "作品名、キーワード、または不明な固有名詞" },
+        query: { type: "string", description: "作品名、キーワード、または不明な固有名詞（英語・日本語・カタカナどれでもOK、元の表記のまま検索。「映画」「movie」等の一般語は除外し、固有名詞のみ）" },
         genre: { type: "string", description: "ジャンル" },
         year: { type: "number", description: "公開年" },
       },
       required: ["query"],
     },
   },
-];
-
-// Keywords to detect if movie search is needed
-const MOVIE_KEYWORDS = [
-  // 明示的な映画関連
-  "映画", "ムービー", "アニメ", "ドラマ", "シリーズ", "作品", "番組",
-  "監督", "俳優", "女優", "声優", "キャスト", "主演",
-  // ジャンル
-  "ホラー", "コメディ", "アクション", "ロマンス", "恋愛", "サスペンス", "ミステリー",
-  "ファンタジー", "アドベンチャー", "冒険", "ドキュメンタリー", "スリラー",
-  // スタジオ・監督名
-  "ジブリ", "ピクサー", "ディズニー", "マーベル", "ワーナー", "ネットフリックス",
-  "宮崎", "新海", "細田", "庵野", "北野", "是枝", "黒澤",
-  // 有名作品
-  "千と千尋", "君の名は", "トトロ", "もののけ", "ワンピース", "鬼滅", "進撃",
-  "スターウォーズ", "ハリーポッター", "アベンジャーズ",
-  // アクション動詞
-  "見たい", "観たい", "見た", "観た", "知ってる", "聞いたことある",
-  "おすすめ", "面白い", "評価", "レビュー", "感想",
-  // 質問パターン
-  "何", "どんな", "どう", "教えて", "ある"
+  {
+    name: "gourmet_search",
+    description: "レストラン・飲食店を検索。エリア、料理ジャンル、店名などで検索する。店名は元の表記のまま検索する（翻訳不要）",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        query: { type: "string", description: "店名、料理ジャンル、キーワード（英語・日本語・カタカナどれでもOK、元の表記のまま検索。「レストラン」「restaurant」等の一般語は除外し、固有名詞のみ）" },
+        area: { type: "string", description: "エリア・地域名（例：新宿、渋谷、銀座）" },
+        cuisine: { type: "string", description: "料理の種類（例：イタリアン、和食、寿司）" },
+      },
+      required: ["query"],
+    },
+  },
 ];
 
 // Enhanced in-memory LRU cache for common requests (inspired by TEN Framework)
@@ -198,12 +115,80 @@ function getInstantResponse(message: string): ChatResponse | null {
 
 /**
  * Check if the query needs movie search tools
+ * Considers both explicit keywords and conversation context
  */
-export function needsMovieSearch(message: string): boolean {
+export function needsMovieSearch(message: string, history?: ConversationTurn[]): boolean {
   const lowerMessage = message.toLowerCase();
-  return MOVIE_KEYWORDS.some(keyword =>
+  
+  // Explicit movie keywords
+  const hasExplicitKeyword = MOVIE_KEYWORDS.some(keyword =>
     lowerMessage.includes(keyword.toLowerCase())
   );
+  
+  if (hasExplicitKeyword) return true;
+  
+  // Implicit detection: Check if recent conversation was about movies
+  if (history && history.length > 0) {
+    const recentTurns = history.slice(-3); // Last 3 turns
+    const hasMovieContext = recentTurns.some(turn => turn.domain === 'movie');
+    
+    if (hasMovieContext) {
+      // Implicit follow-up questions that need data
+      const implicitPatterns = [
+        /教えて|紹介|おすすめ|詳しく|もっと|他に|別の|探し|検索|知りたい|見たい|聞きたい/,
+        /それ|その|こ[のれ]|あ[のれ]/, // これ, それ, あれ, この, その, あの
+        /どんな|何|誰|いつ|どこ|なぜ|どう/,
+      ];
+      
+      return implicitPatterns.some(pattern => pattern.test(lowerMessage));
+    }
+  }
+  
+  return false;
+}
+
+/**
+ * Check if the query needs gourmet search tools
+ * Considers both explicit keywords and conversation context
+ */
+export function needsGourmetSearch(message: string, history?: ConversationTurn[]): boolean {
+  const lowerMessage = message.toLowerCase();
+  
+  // Explicit gourmet keywords
+  const hasExplicitKeyword = GOURMET_KEYWORDS.some(keyword =>
+    lowerMessage.includes(keyword.toLowerCase())
+  );
+  
+  if (hasExplicitKeyword) return true;
+  
+  // Implicit detection: Check if recent conversation was about gourmet
+  if (history && history.length > 0) {
+    const recentTurns = history.slice(-3); // Last 3 turns
+    const hasGourmetContext = recentTurns.some(turn => turn.domain === 'gourmet');
+    
+    if (hasGourmetContext) {
+      // Implicit follow-up questions that need data
+      const implicitPatterns = [
+        /教えて|紹介|おすすめ|詳しく|もっと|他に|別の|探し|検索|知りたい|行きたい|聞きたい/,
+        /それ|その|こ[のれ]|あ[のれ]/, // これ, それ, あれ, この, その, あの
+        /どんな|何|誰|いつ|どこ|なぜ|どう/,
+        /予算|値段|価格|料金|安い|高い/, // Price-related (gourmet specific)
+        /営業|時間|定休|予約/, // Hours/reservation (gourmet specific)
+      ];
+      
+      return implicitPatterns.some(pattern => pattern.test(lowerMessage));
+    }
+  }
+  
+  return false;
+}
+
+/**
+ * Check if the query needs any search tools (movie or gourmet)
+ * Now considers conversation history for implicit detection
+ */
+export function needsSearch(message: string, history?: ConversationTurn[]): boolean {
+  return needsMovieSearch(message, history) || needsGourmetSearch(message, history);
 }
 
 /**
@@ -537,7 +522,8 @@ function finalizeStream(
  * Now supports sentence-level streaming for parallel TTS
  *
  * @param onMovieSearch - Callback that receives search params and returns formatted results string
- *                        The string is passed directly to the LLM as tool result content
+ * @param onGourmetSearch - Callback that receives search params and returns formatted results string
+ *                          The string is passed directly to the LLM as tool result content
  */
 export async function chat(
   history: ConversationTurn[],
@@ -545,7 +531,9 @@ export async function chat(
   onMovieSearch?: (query: string, genre?: string, year?: number) => Promise<string>,
   onChunk?: (text: string) => void,
   onSentence?: (sentence: string, emotion: EmotionType) => void,
-  onToolUse?: () => void  // Called when tool_use is detected (before DB search)
+  onToolUse?: () => void,  // Called when tool_use is detected (before DB search)
+  userContext?: any,  // User context from user_profile (UserContext type)
+  onGourmetSearch?: (query: string, area?: string, cuisine?: string) => Promise<string>
 ): Promise<ChatResponse> {
   const messages = [
     ...toClaudeMessages(history),
@@ -563,7 +551,14 @@ export async function chat(
     }
   }
 
-  const useTools = needsMovieSearch(userMessage);
+  // Detect scenario and build appropriate system prompt
+  const scenario = detectScenario(userMessage, history);
+  const systemPrompt = buildSystemPrompt(scenario, userContext);
+  
+  log.debug(`Scenario detected: ${scenario}`);
+
+  // Pass history for implicit detection (e.g., follow-up questions)
+  const useTools = needsSearch(userMessage, history);
   const cacheKey = useTools ? null : getCacheKey(history, userMessage);
   const cached = getCachedResponse(cacheKey);
   if (cached) {
@@ -575,15 +570,6 @@ export async function chat(
   try {
     // Non-tool streaming path
     if (!useTools && onChunk) {
-      const stream = await anthropic.messages.stream({
-        // model: "claude-sonnet-4-20250514",
-        model: "claude-3-5-haiku-20241022",
-        max_tokens: MAX_TOKENS_DEFAULT,
-        system: SYSTEM_PROMPT,
-        stop_sequences: STOP_SEQUENCES,
-        messages,
-      });
-
       const state: StreamState = {
         fullText: "",
         sentenceBuffer: "",
@@ -592,10 +578,14 @@ export async function chat(
         pendingText: "",
       };
 
-      for await (const event of stream) {
-        if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
-          processStreamEvent(event.delta.text, state, onChunk, onSentence);
-        }
+      // Use unified LLM streaming (supports both Anthropic and Bedrock)
+      for await (const text of invokeLLMStream({
+        max_tokens: MAX_TOKENS_DEFAULT,
+        system: systemPrompt,
+        messages,
+        stop_sequences: STOP_SEQUENCES,
+      })) {
+        processStreamEvent(text, state, onChunk, onSentence);
       }
 
       const { fullText, emotion } = finalizeStream(state, onSentence);
@@ -604,21 +594,23 @@ export async function chat(
       return result;
     }
 
-    const response = await anthropic.messages.create({
-      // model: "claude-sonnet-4-20250514",
-      model: "claude-3-5-haiku-20241022",
+    // Use unified LLM invocation (supports both Anthropic and Bedrock)
+    const response = await invokeLLM({
       max_tokens: useTools ? MAX_TOKENS_TOOL : MAX_TOKENS_DEFAULT,
-      system: SYSTEM_PROMPT,
+      system: systemPrompt,
+      messages,
       stop_sequences: STOP_SEQUENCES,
       tools: useTools ? tools : undefined,
-      messages,
     });
 
     if (response.stop_reason === "tool_use") {
       const toolUseBlock = response.content.find(
-        (block): block is Anthropic.ToolUseBlock => block.type === "tool_use"
+        (block) => block.type === "tool_use"
       );
 
+      let searchResultContent: string | null = null;
+
+      // Handle movie search
       if (toolUseBlock && toolUseBlock.name === "search_movies" && onMovieSearch) {
         // Notify that tool use is starting (for waiting signal)
         if (onToolUse) {
@@ -626,17 +618,37 @@ export async function chat(
         }
         
         const input = toolUseBlock.input as { query: string; genre?: string; year?: number };
-        // onMovieSearch now returns formatted string (combined DB + Google results)
-        const searchResultContent = await onMovieSearch(input.query, input.genre, input.year);
+        // onMovieSearch now returns formatted string (database results only)
+        searchResultContent = await onMovieSearch(input.query, input.genre, input.year);
+      }
+      
+      // Handle gourmet search
+      if (toolUseBlock && toolUseBlock.name === "gourmet_search" && onGourmetSearch) {
+        // Notify that tool use is starting (for waiting signal)
+        if (onToolUse) {
+          onToolUse();
+        }
+        
+        const input = toolUseBlock.input as { query: string; area?: string; cuisine?: string };
+        searchResultContent = await onGourmetSearch(input.query, input.area, input.cuisine);
+      }
+
+      if (searchResultContent && toolUseBlock) {
 
         // Use streaming for follow-up response to enable parallel TTS
         if (onChunk || onSentence) {
-          const followUpStream = await anthropic.messages.stream({
-            // model: "claude-sonnet-4-20250514",
-            model: "claude-3-5-haiku-20241022",
+          const state: StreamState = {
+            fullText: "",
+            sentenceBuffer: "",
+            detectedEmotion: "neutral",
+            emotionParsed: false,
+            pendingText: "",
+          };
+
+          // Use unified LLM streaming for follow-up
+          for await (const text of invokeLLMStream({
             max_tokens: MAX_TOKENS_TOOL_FOLLOWUP,
-            system: SYSTEM_PROMPT,
-            stop_sequences: STOP_SEQUENCES,
+            system: systemPrompt,
             messages: [
               ...messages,
               { role: "assistant", content: response.content },
@@ -651,20 +663,9 @@ export async function chat(
                 ],
               },
             ],
-          });
-
-          const state: StreamState = {
-            fullText: "",
-            sentenceBuffer: "",
-            detectedEmotion: "neutral",
-            emotionParsed: false,
-            pendingText: "",
-          };
-
-          for await (const event of followUpStream) {
-            if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
-              processStreamEvent(event.delta.text, state, onChunk, onSentence);
-            }
+            stop_sequences: STOP_SEQUENCES,
+          })) {
+            processStreamEvent(text, state, onChunk, onSentence);
           }
 
           const { fullText, emotion } = finalizeStream(state, onSentence);
@@ -672,12 +673,9 @@ export async function chat(
         }
 
         // Non-streaming fallback
-        const followUpResponse = await anthropic.messages.create({
-          // model: "claude-sonnet-4-20250514",
-          model: "claude-3-5-haiku-20241022",
+        const followUpResponse = await invokeLLM({
           max_tokens: MAX_TOKENS_TOOL_FOLLOWUP,
-          system: SYSTEM_PROMPT,
-          stop_sequences: STOP_SEQUENCES,
+          system: systemPrompt,
           messages: [
             ...messages,
             { role: "assistant", content: response.content },
@@ -692,11 +690,12 @@ export async function chat(
               ],
             },
           ],
+          stop_sequences: STOP_SEQUENCES,
         });
 
         const textContent = followUpResponse.content
-          .filter((block): block is Anthropic.TextBlock => block.type === "text")
-          .map((block) => block.text)
+          .filter((block) => block.type === "text")
+          .map((block) => block.text || "")
           .join("");
 
         const { emotion, text: rawText } = parseEmotionAndText(textContent);
@@ -705,8 +704,8 @@ export async function chat(
     }
 
     const textContent = response.content
-      .filter((block): block is Anthropic.TextBlock => block.type === "text")
-      .map((block) => block.text)
+      .filter((block) => block.type === "text")
+      .map((block) => block.text || "")
       .join("");
 
     const { emotion, text: rawText } = parseEmotionAndText(textContent);

@@ -14,16 +14,28 @@ export const config = {
   port: parseInt(process.env.PORT || "3001", 10),
   corsOrigin: process.env.CORS_ORIGIN || "http://localhost:3000",
 
-  // AWS Transcribe
+  // LLM Provider Configuration
+  llm: {
+    provider: process.env.LLM_PROVIDER || "anthropic", // "anthropic" or "bedrock"
+  },
+
+  // AWS Services (Transcribe + Bedrock)
   aws: {
     region: process.env.AWS_REGION || "ap-northeast-1",
     accessKeyId: process.env.AWS_ACCESS_KEY_ID || "",
     secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || "",
   },
 
-  // Anthropic Claude
+  // Anthropic Claude (direct API)
   anthropic: {
     apiKey: process.env.ANTHROPIC_API_KEY || "",
+    model: process.env.ANTHROPIC_MODEL || "claude-3-5-haiku-20241022",
+  },
+
+  // AWS Bedrock (Claude via Bedrock)
+  bedrock: {
+    region: process.env.AWS_BEDROCK_REGION || process.env.AWS_REGION || "ap-northeast-1",
+    modelId: process.env.AWS_BEDROCK_MODEL_ID || "anthropic.claude-haiku-4-5-20251001-v1:0",
   },
 
   // PostgreSQL
@@ -50,12 +62,26 @@ export const config = {
 export function validateConfig(): void {
   const missing: string[] = [];
 
-  if (!config.anthropic.apiKey) {
-    missing.push("ANTHROPIC_API_KEY");
+  // Check LLM provider configuration
+  if (config.llm.provider === "anthropic" && !config.anthropic.apiKey) {
+    missing.push("ANTHROPIC_API_KEY (required for Anthropic provider)");
+  }
+
+  if (config.llm.provider === "bedrock") {
+    if (!config.aws.accessKeyId || !config.aws.secretAccessKey) {
+      missing.push("AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY (required for Bedrock provider)");
+    }
   }
 
   if (missing.length > 0) {
     logger.warn(`Missing environment variables: ${missing.join(", ")}`);
     logger.warn("Some features may not work correctly.");
+  }
+
+  logger.info(`LLM Provider: ${config.llm.provider}`);
+  if (config.llm.provider === "bedrock") {
+    logger.info(`Bedrock Model: ${config.bedrock.modelId}`);
+  } else {
+    logger.info(`Anthropic Model: ${config.anthropic.model}`);
   }
 }

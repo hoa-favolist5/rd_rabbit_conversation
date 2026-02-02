@@ -4,13 +4,19 @@
 
 ## ✨ 機能
 
-- **音声入力**: AWS Transcribe Streamingによるリアルタイム音声認識 (フロントエンド直接接続)
+- **音声入力**: AWS Transcribe Streamingによるリアルタイム音声認識 (STS一時認証情報使用)
+- **セキュア認証**: STS一時トークンによる安全なAWS認証 (本番環境対応)
+- **自動フォールバック**: AWS障害時にWeb Speech APIへ自動切り替え
 - **RNNoise統合**: Mozilla製AIノイズ除去対応 (デフォルトOFF、日本語認識精度優先)
 - **バージイン対応**: AIの話し中に割り込んで新しい質問が可能
+- **自動停止**: 10秒無音検知、タブ非表示時の自動停止でコスト削減
 - **日本語会話**: Claude 3.5 Haikuによる自然な日本語会話
 - **感情表現**: Lottieアニメーションで感情を表現
 - **音声出力**: Azure Neural TTSによる感情豊かな音声合成
 - **映画検索**: データベースから映画情報を検索して回答
+- **会話履歴**: PostgreSQLに会話を保存し、ドメイン別(movie/gourmet/general)にコンテキスト管理
+- **ユーザー認証**: トークンベースの認証とパーソナライズされた会話
+- **ユーザーアーカイブ**: 映画やグルメ情報を個人アーカイブに保存 (NEW!)
 - **リアルタイム**: WebSocketによる低遅延通信
 
 ## 🏗️ アーキテクチャ
@@ -177,6 +183,28 @@ docker-compose up -d
 npm run db:setup
 ```
 
+このコマンドで以下が作成されます:
+- `movies` テーブル: 映画情報データベース
+- `conversation_history` テーブル: 会話履歴（ドメイン付き）
+- `user_profile` テーブル: ユーザープロフィール
+- `user_archive` テーブル: ユーザーアーカイブ（映画・グルメ保存機能）
+
+既存のデータベースにテーブルを追加する場合:
+
+```bash
+# 会話履歴テーブルの追加
+npm run db:migrate
+
+# ユーザーアーカイブテーブルの追加
+npm run db:migrate-archive
+```
+
+ユーザープロフィールデータをインポート:
+
+```bash
+npm run db:import-users
+```
+
 ### 6. 開発サーバーの起動
 
 ```bash
@@ -213,6 +241,39 @@ rabbit/
 ├── package.json             # ルートパッケージ
 └── README.md
 ```
+
+## 📚 ユーザーアーカイブ機能
+
+会話中に気になった映画やレストランを個人アーカイブに保存できます:
+
+### 使い方
+
+1. **UIから保存**: 
+   - 映画やグルメの応答に 📚 アイコンが自動表示
+   - 📚 アイコンをクリック
+   - ✓ に変わり保存完了
+
+2. **対象メッセージ**:
+   - 映画についての会話（自動検出）
+   - グルメについての会話（自動検出）
+
+### API エンドポイント
+
+```bash
+# 保存
+POST /api/archive
+
+# 取得（ドメインでフィルタ可能）
+GET /api/archive/:userId?domain=movie
+
+# 削除
+DELETE /api/archive
+
+# 存在確認
+GET /api/archive/:userId/:domain/:itemId
+```
+
+詳細は [ARCHIVE_FEATURE.md](./ARCHIVE_FEATURE.md) を参照してください。
 
 ## 🎭 感情表現
 
@@ -252,6 +313,149 @@ rabbit/
 | Frontend | Next.js 15, React 18, TypeScript |
 | Backend | Node.js, Express, WebSocket |
 | Database | PostgreSQL |
+
+## 💾 会話履歴とドメイン管理
+
+会話履歴は自動的にPostgreSQLデータベースに保存され、ドメイン別にコンテキストが管理されます。
+
+### ドメインタイプ
+
+会話内容から自動的にドメインを検出:
+
+| ドメイン | 説明 | キーワード例 |
+|---------|------|-------------|
+| `movie` | 映画関連の会話 | 映画、アニメ、監督、俳優、ジャンル |
+| `gourmet` | グルメ関連の会話 | レストラン、料理、カフェ、メニュー |
+| `general` | 一般的な会話 | その他すべて |
+
+### データベーススキーマ
+
+```sql
+CREATE TABLE conversation_history (
+  id SERIAL PRIMARY KEY,
+  session_id VARCHAR(255) NOT NULL,
+  user_id VARCHAR(255),                -- ユーザーID (任意)
+  user_name VARCHAR(255),              -- ユーザー名 (任意)
+  user_token TEXT,                     -- 認証トークン (任意)
+  role VARCHAR(20) NOT NULL,           -- 'user' or 'assistant'
+  content TEXT NOT NULL,               -- 会話内容
+  domain VARCHAR(50) NOT NULL,         -- 'movie', 'gourmet', 'general'
+  emotion VARCHAR(20),                 -- AIの感情 (assistantの場合)
+  created_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+### インデックス
+
+高速検索のため以下のインデックスを作成:
+- `session_id`: セッション別の会話履歴取得
+- `user_id`: ユーザー別の会話履歴取得
+- `domain`: ドメイン別の会話分析
+- `created_at`: 時系列順の取得
+- `session_id + domain`: セッション内のドメイン別履歴
+- `user_id + domain`: ユーザーのドメイン別履歴
+
+### 使用例
+
+```typescript
+import { 
+  getConversationHistory, 
+  getConversationHistoryByUserId,
+  getRecentHistoryByDomain,
+  getConversationStats,
+  getUniqueUsers
+} from './db/conversation.js';
+
+// セッションの会話履歴を取得
+const history = await getConversationHistory('session-123');
+
+// 映画ドメインの会話のみ取得
+const movieHistory = await getConversationHistory('session-123', 'movie');
+
+// ユーザーの全会話を取得
+const userHistory = await getConversationHistoryByUserId('user-789');
+
+// ユーザーの映画会話のみ取得
+const userMovies = await getConversationHistoryByUserId('user-789', 'movie');
+
+// 最近の映画関連の会話を取得（全セッション）
+const recentMovies = await getRecentHistoryByDomain('movie', 100);
+
+// ユーザー一覧と活動状況
+const users = await getUniqueUsers();
+
+// ドメイン別の統計情報
+const stats = await getConversationStats();
+// => { movie: { total: 1500, sessions: 45 }, gourmet: { total: 300, sessions: 12 }, ... }
+```
+
+### 自動ドメイン検出
+
+ユーザーメッセージから自動的にドメインを検出し、会話履歴に記録:
+
+```typescript
+// 例: "アクション映画を探しています"
+// → ドメイン: movie
+
+// 例: "美味しいラーメン屋を教えて"
+// → ドメイン: gourmet
+
+// 例: "今日の天気は？"
+// → ドメイン: general
+```
+
+### ユーザー情報の設定
+
+WebSocket接続後、ユーザー情報を設定できます:
+
+```typescript
+// フロントエンドから送信
+ws.send(JSON.stringify({
+  type: "set_user_info",
+  userId: "user-789",
+  userName: "山田太郎",
+  userToken: "auth-token-xyz"  // 任意
+}));
+```
+
+設定後の会話は自動的にユーザー情報と共に保存されます。
+
+### ユーザー認証とパーソナライゼーション
+
+トークンベースの認証により、ユーザー情報を活用したパーソナライズされた会話が可能です。
+
+#### REST API
+
+```bash
+# ユーザー情報を取得（トークン指定）
+GET /api/auth/user?token=usr_xxx
+
+```
+
+#### 使用例
+
+```typescript
+// 1. トークン取得
+const res = await fetch('http://localhost:3001/api/auth/token', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ usersId: 1 })
+});
+const { token } = await res.json();
+
+// 2. WebSocket接続時にトークン送信
+ws.send(JSON.stringify({
+  type: 'set_user_info',
+  userToken: token
+}));
+
+// 3. AIは自動的にユーザー情報を活用
+// - 年齢に応じたコンテンツ推薦
+// - 興味・趣味に基づいた提案
+// - 地域に応じた情報提供
+```
+
+詳細は **[USER_AUTHENTICATION.md](./USER_AUTHENTICATION.md)** を参照してください。
 
 ## 🎤 音声入力とバージイン機能
 
@@ -300,6 +504,14 @@ rabbit/
 // テキスト入力
 { "type": "text_input", "text": "こんにちは" }
 
+// ユーザー情報設定
+{ 
+  "type": "set_user_info", 
+  "userId": "user-789",
+  "userName": "山田太郎",
+  "userToken": "auth-token-xyz"
+}
+
 // リスニング開始
 { "type": "start_listening" }
 
@@ -347,6 +559,24 @@ docker-compose up -d
 
 - `ANTHROPIC_API_KEY` が正しく設定されているか確認
 - APIキーに十分なクレジットがあるか確認
+
+## 📚 ドキュメント
+
+- **[STT_QUICK_START.md](./STT_QUICK_START.md)**: 音声認識クイックスタートガイド
+  - 5分でセットアップ
+  - 使い方とサンプルコード
+  - トラブルシューティング
+- **[STT_QUALITY_DEGRADATION.md](./STT_QUALITY_DEGRADATION.md)**: 音声認識品質低下の解決 (NEW!)
+  - 時間経過による品質低下の原因
+  - 自動セッションリフレッシュ機能
+  - 95%精度を無期限に維持
+- **[AWS_TRANSCRIBE_HYBRID.md](./AWS_TRANSCRIBE_HYBRID.md)**: AWS Transcribe ハイブリッド実装ガイド
+  - STS一時認証情報の実装
+  - Web Speech APIフォールバック
+  - 自動停止機能
+  - セキュリティベストプラクティス
+- **[CLAUDE.md](./CLAUDE.md)**: プロジェクト概要とコマンドリファレンス
+- **[WORKFLOW.md](./WORKFLOW.md)**: 開発ワークフローとベストプラクティス
 
 ## 📄 ライセンス
 

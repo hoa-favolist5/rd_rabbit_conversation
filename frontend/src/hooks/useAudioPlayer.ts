@@ -2,6 +2,10 @@
 
 import { useState, useCallback, useRef, useEffect } from "react";
 import { createLogger } from "@/utils/logger";
+import {
+  playAudioFromBase64,
+  setSharedVolume,
+} from "@/utils/audioUnlock";
 
 const log = createLogger("AudioPlayer");
 
@@ -25,8 +29,7 @@ interface UseAudioPlayerReturn {
 
 export function useAudioPlayer(): UseAudioPlayerReturn {
   const [isPlaying, setIsPlaying] = useState(false);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
+  const sourceRef = useRef<AudioBufferSourceNode | null>(null);
 
   // Queue for chunked audio playback
   const audioQueueRef = useRef<Map<number, string>>(new Map());
@@ -43,27 +46,28 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
   const isProtectedAudioRef = useRef(false);
   const protectedAudioQueueRef = useRef<Array<{ base64Audio: string; format: string; responseId?: string }>>([]);
   const POST_PROTECTED_DELAY = 400; // 400ms delay after protected audio completes
-  
+
   // Callback ref for processNextChunk (to avoid circular dependencies)
   const processNextChunkRef = useRef<(() => Promise<void>) | null>(null);
 
-  // Initialize AudioContext on first user interaction
-  const getAudioContext = useCallback(() => {
-    if (!audioContextRef.current) {
-      audioContextRef.current = new AudioContext();
+  // Safely stop an AudioBufferSourceNode (may throw if already stopped)
+  const stopSource = useCallback((source: AudioBufferSourceNode | null) => {
+    if (source) {
+      try {
+        source.stop();
+      } catch {
+        // Already stopped — ignore
+      }
     }
-    return audioContextRef.current;
   }, []);
 
   // Stop all audio and reject future audio until new response starts
   const cancelAllAudio = useCallback(() => {
-    log.debug("🚫 CANCEL ALL: Stopping audio and rejecting future audio");
+    log.debug("CANCEL ALL: Stopping audio and rejecting future audio");
 
     // Stop current audio (including protected audio)
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current = null;
-    }
+    stopSource(sourceRef.current);
+    sourceRef.current = null;
 
     // Clear queue
     isPlayingQueueRef.current = false;
@@ -79,7 +83,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     // Reject all audio until new response with valid responseId
     acceptedResponseIdRef.current = "__CANCELLED__";
     setIsPlaying(false);
-  }, []);
+  }, [stopSource]);
 
   // Play full audio (for greeting, long_waiting, sequential TTS)
   const play = useCallback(
@@ -88,16 +92,16 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
       if (acceptedResponseIdRef.current === "__CANCELLED__") {
         // Only accept if it has a responseId (new response starting)
         if (!responseId) {
-          log.debug("🚫 Rejecting audio - cancelled and no responseId");
+          log.debug("Rejecting audio - cancelled and no responseId");
           return;
         }
         // New response with responseId - accept it
-        log.debug(`✅ Accepting new response: ${responseId.slice(-8)}`);
+        log.debug(`Accepting new response: ${responseId.slice(-8)}`);
         acceptedResponseIdRef.current = responseId;
       } else if (acceptedResponseIdRef.current && responseId) {
         // We have an accepted responseId - check if this matches
         if (responseId !== acceptedResponseIdRef.current) {
-          log.debug(`🚫 Rejecting audio - wrong responseId: got ${responseId.slice(-8)}, want ${acceptedResponseIdRef.current.slice(-8)}`);
+          log.debug(`Rejecting audio - wrong responseId: got ${responseId.slice(-8)}, want ${acceptedResponseIdRef.current.slice(-8)}`);
           return;
         }
       }
@@ -109,16 +113,16 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
 
       // If protected audio is currently playing, queue this audio
       if (isProtectedAudioRef.current && !isProtected) {
-        log.debug(`⏳ Protected audio playing - queueing result audio (responseId: ${responseId?.slice(-8) || 'none'})`);
+        log.debug(`Protected audio playing - queueing result audio (responseId: ${responseId?.slice(-8) || 'none'})`);
         protectedAudioQueueRef.current.push({ base64Audio, format, responseId });
         return;
       }
 
       try {
         // Stop any currently playing audio (unless it's protected)
-        if (audioRef.current && !isProtectedAudioRef.current) {
-          audioRef.current.pause();
-          audioRef.current = null;
+        if (sourceRef.current && !isProtectedAudioRef.current) {
+          stopSource(sourceRef.current);
+          sourceRef.current = null;
         }
 
         // Clear chunk queue
@@ -130,30 +134,29 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
 
         // Mark as protected if this is protected audio
         if (isProtected) {
-          log.debug(`🛡️ Playing protected audio (long-waiting)`);
+          log.debug(`Playing protected audio (long-waiting)`);
           isProtectedAudioRef.current = true;
         }
 
-        // Create and play audio
-        const audio = new Audio();
-        audio.volume = 1.0;
-        audioRef.current = audio;
+        // Decode and play via Web Audio API
+        const { source } = await playAudioFromBase64(base64Audio, format);
+        sourceRef.current = source;
+        setIsPlaying(true);
 
-        audio.onplay = () => setIsPlaying(true);
-        audio.onended = async () => {
+        source.onended = async () => {
           setIsPlaying(false);
-          
+
           // If this was protected audio, wait delay then play queued audio
           if (isProtected) {
-            log.debug(`✅ Protected audio ended, waiting ${POST_PROTECTED_DELAY}ms before playing result...`);
+            log.debug(`Protected audio ended, waiting ${POST_PROTECTED_DELAY}ms before playing result...`);
             isProtectedAudioRef.current = false;
-            
+
             // Wait the post-protected delay
             await new Promise(resolve => setTimeout(resolve, POST_PROTECTED_DELAY));
-            
+
             // Check if we have buffered chunks (parallel TTS)
             if (audioQueueRef.current.size > 0 && totalChunksRef.current > 0) {
-              log.debug(`▶️ Playing buffered chunks (${audioQueueRef.current.size}/${totalChunksRef.current})`);
+              log.debug(`Playing buffered chunks (${audioQueueRef.current.size}/${totalChunksRef.current})`);
               isPlayingQueueRef.current = true;
               isProcessingChunkRef.current = false;
               currentChunkIndexRef.current = 0;
@@ -166,34 +169,28 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
             else if (protectedAudioQueueRef.current.length > 0) {
               const queued = protectedAudioQueueRef.current.shift();
               if (queued) {
-                log.debug(`▶️ Playing queued result audio (responseId: ${queued.responseId?.slice(-8) || 'none'})`);
+                log.debug(`Playing queued result audio (responseId: ${queued.responseId?.slice(-8) || 'none'})`);
                 play(queued.base64Audio, queued.format, queued.responseId, false);
               }
             }
           }
         };
-        audio.onerror = (e) => {
-          log.error("Audio playback error:", e);
-          setIsPlaying(false);
-          isProtectedAudioRef.current = false;
-        };
-
-        const mimeType = format === "mp3" ? "audio/mpeg" : `audio/${format}`;
-        audio.src = `data:${mimeType};base64,${base64Audio}`;
-
-        const ctx = getAudioContext();
-        if (ctx.state === "suspended") {
-          await ctx.resume();
-        }
-
-        await audio.play();
       } catch (error) {
-        log.error("Failed to play audio:", error);
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        log.error(`Failed to play audio (responseId: ${responseId?.slice(-8) || 'none'}, protected: ${isProtected}):`, errorMsg);
+        
+        // Log additional context for debugging
+        if (base64Audio) {
+          log.debug(`Audio data length: ${base64Audio.length} chars, format: ${format}`);
+        } else {
+          log.error("Audio data is empty or undefined");
+        }
+        
         setIsPlaying(false);
         isProtectedAudioRef.current = false;
       }
     },
-    [getAudioContext]
+    [stopSource]
   );
 
   // Process next chunk in queue
@@ -218,66 +215,51 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
       return;
     }
 
-    const audio = new Audio();
-    audio.volume = 1.0;
-    audio.src = `data:audio/mpeg;base64,${audioData}`;
-    audioRef.current = audio;
-
-    audio.onended = () => {
-      isProcessingChunkRef.current = false;
-      currentChunkIndexRef.current++;
-      processNextChunk();
-    };
-
-    audio.onerror = () => {
-      log.error(`Audio chunk ${nextIndex} failed`);
-      isProcessingChunkRef.current = false;
-      currentChunkIndexRef.current++;
-      processNextChunk();
-    };
-
     try {
-      const ctx = getAudioContext();
-      if (ctx.state === "suspended") {
-        await ctx.resume();
-      }
-      await audio.play();
+      const { source } = await playAudioFromBase64(audioData, "mp3");
+      sourceRef.current = source;
+
+      source.onended = () => {
+        isProcessingChunkRef.current = false;
+        currentChunkIndexRef.current++;
+        processNextChunk();
+      };
     } catch (error) {
-      log.error("Chunk playback error:", error);
+      log.error(`Audio chunk ${nextIndex} failed:`, error);
       isProcessingChunkRef.current = false;
       currentChunkIndexRef.current++;
       processNextChunk();
     }
-  }, [getAudioContext]);
+  }, []);
 
   // Play audio chunk (for parallel TTS streaming)
   const playChunk = useCallback((chunk: AudioChunk) => {
     // Check if we should accept this chunk
     if (acceptedResponseIdRef.current === "__CANCELLED__") {
       if (!chunk.responseId) {
-        log.debug(`🚫 Rejecting chunk ${chunk.index} - cancelled and no responseId`);
+        log.debug(`Rejecting chunk ${chunk.index} - cancelled and no responseId`);
         return;
       }
       if (chunk.index !== 0) {
-        log.debug(`🚫 Rejecting chunk ${chunk.index} - cancelled, waiting for chunk 0`);
+        log.debug(`Rejecting chunk ${chunk.index} - cancelled, waiting for chunk 0`);
         return;
       }
       // Chunk 0 with responseId - new response starting
-      log.debug(`✅ Accepting new response from chunk 0: ${chunk.responseId.slice(-8)}`);
+      log.debug(`Accepting new response from chunk 0: ${chunk.responseId.slice(-8)}`);
       acceptedResponseIdRef.current = chunk.responseId;
     } else if (acceptedResponseIdRef.current && chunk.responseId) {
       if (chunk.responseId !== acceptedResponseIdRef.current) {
-        log.debug(`🚫 Rejecting chunk ${chunk.index} - wrong responseId`);
+        log.debug(`Rejecting chunk ${chunk.index} - wrong responseId`);
         return;
       }
     }
 
     // If protected audio is playing, buffer chunks but don't start playback yet
     if (isProtectedAudioRef.current) {
-      log.debug(`⏳ Protected audio playing - buffering chunk ${chunk.index}/${chunk.total}`);
+      log.debug(`Protected audio playing - buffering chunk ${chunk.index}/${chunk.total}`);
       audioQueueRef.current.set(chunk.index, chunk.data);
       totalChunksRef.current = chunk.total;
-      
+
       // If this is chunk 0, mark that we have a pending chunked response
       if (chunk.index === 0 && chunk.responseId) {
         acceptedResponseIdRef.current = chunk.responseId;
@@ -289,14 +271,12 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     if (chunk.index === 0) {
       if (chunk.responseId) {
         acceptedResponseIdRef.current = chunk.responseId;
-        log.debug(`🎵 Starting response: ${chunk.responseId.slice(-8)}`);
+        log.debug(`Starting response: ${chunk.responseId.slice(-8)}`);
       }
 
       // Stop current audio
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current = null;
-      }
+      stopSource(sourceRef.current);
+      sourceRef.current = null;
 
       // Clear and setup new queue
       audioQueueRef.current.clear();
@@ -322,15 +302,12 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     if (!isProcessingChunkRef.current && audioQueueRef.current.has(currentChunkIndexRef.current)) {
       processNextChunk();
     }
-  }, [processNextChunk]);
+  }, [processNextChunk, stopSource]);
 
   // Stop audio playback
   const stop = useCallback(() => {
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.currentTime = 0;
-      audioRef.current = null;
-    }
+    stopSource(sourceRef.current);
+    sourceRef.current = null;
 
     isPlayingQueueRef.current = false;
     isProcessingChunkRef.current = false;
@@ -338,14 +315,17 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     currentChunkIndexRef.current = 0;
     totalChunksRef.current = 0;
     setIsPlaying(false);
+  }, [stopSource]);
+
+  // Set volume via shared GainNode
+  const setVolume = useCallback((volume: number) => {
+    setSharedVolume(volume);
   }, []);
 
-  // Set volume
-  const setVolume = useCallback((volume: number) => {
-    if (audioRef.current) {
-      audioRef.current.volume = Math.max(0, Math.min(1, volume));
-    }
-  }, []);
+  // Keep processNextChunk ref updated
+  useEffect(() => {
+    processNextChunkRef.current = processNextChunk;
+  }, [processNextChunk]);
 
   // Keep processNextChunk ref updated
   useEffect(() => {
@@ -355,15 +335,10 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current = null;
-      }
-      if (audioContextRef.current) {
-        audioContextRef.current.close();
-      }
+      stopSource(sourceRef.current);
+      sourceRef.current = null;
     };
-  }, []);
+  }, [stopSource]);
 
   return {
     isPlaying,

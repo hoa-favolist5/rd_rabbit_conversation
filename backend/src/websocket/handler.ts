@@ -1,12 +1,16 @@
 import { WebSocket } from "ws";
 import { v4 as uuidv4 } from "uuid";
-import { chat, needsMovieSearch } from "../services/claude.js";
+import { chat, needsMovieSearch, needsGourmetSearch, needsSearch } from "../services/claude.js";
 import { synthesizeSpeechBase64 } from "../services/google-tts.js";
 import { searchMovies } from "../db/movies.js";
+import { searchGourmetRestaurants } from "../db/gourmet.js";
 import { combinedMovieSearch } from "../services/combined-search.js";
 import { startTimer } from "../utils/timer.js";
 import { generateLongWaitingPhrase, type WaitingContext } from "../services/long-waiting.js";
-import { createLogger, createSessionLogger } from "../utils/logger.js";
+import { createLogger, createUserLogger, setUserId, clearUserId } from "../utils/logger.js";
+import { saveConversationTurn, getConversationHistoryByUserId, recordsToTurns } from "../db/conversation.js";
+import { detectDomain } from "../utils/domain-detector.js";
+import { getRandomUser, userProfileToContext, type UserContext } from "../db/user-profile.js";
 
 const log = createLogger("WS");
 import type {
@@ -19,7 +23,17 @@ import type {
   ErrorMessage,
   WSMessage,
   LongWaitingMessage,
+  DomainType,
+  SetUserInfoMessage,
+  SaveArchiveMessage,
+  LoadHistoryMessage,
+  HistoryLoadedMessage,
+  RequestGreetingMessage,
+  ArchiveItemInfo,
+  Movie,
+  GourmetRestaurant,
 } from "../types/index.js";
+import { saveToArchive, getFriendsWhoSavedItem } from "../db/user-archive.js";
 
 // Configuration for parallel TTS streaming (TEN Framework inspired)
 const ENABLE_PARALLEL_TTS = true;
@@ -92,7 +106,12 @@ interface Session {
   lastActivityTime: number;  // For idle timeout cleanup
   requestCount: number;  // For rate limiting
   requestWindowStart: number;  // Rate limit window start time
-  log: ReturnType<typeof createSessionLogger>;  // Session-specific logger
+  log: ReturnType<typeof createUserLogger>;  // User-specific logger
+  currentDomain: DomainType;  // Current conversation domain
+  userId?: string;  // User identifier (users_id from database)
+  userName?: string;  // User display name (nick_name)
+  userToken?: string;  // User authentication token
+  userContext?: UserContext;  // Full user context for LLM
 }
 
 // Active sessions
@@ -353,13 +372,19 @@ function sendAssistantMessage(
   ws: WebSocket,
   text: string,
   emotion: EmotionType,
-  messageId?: string
+  messageId?: string,
+  domain?: DomainType,
+  archiveItem?: ArchiveItemInfo,
+  searchResults?: import("../types/index.js").SearchResults
 ): void {
   const message: AssistantMessage = {
     type: "assistant_message",
     text,
     emotion,
     ...(messageId ? { messageId } : {}),
+    ...(domain ? { domain } : {}),
+    ...(archiveItem ? { archiveItem } : {}),
+    ...(searchResults ? { searchResults } : {}),
   };
   send(ws, message);
 }
@@ -465,13 +490,54 @@ function sendWorkflowTiming(
 }
 
 /**
+ * Format gourmet search results for LLM
+ */
+function formatGourmetResults(result: import("../types/index.js").GourmetSearchResult): string {
+  if (result.restaurants.length === 0) {
+    return JSON.stringify({ found: 0 });
+  }
+
+  const compact = result.restaurants.slice(0, 5).map(r => ({
+    name: r.name,
+    addr: r.address,
+    copy: r.catch_copy,
+    access: r.access,
+    hours: r.open_hours,
+  }));
+
+  // Log formatted results being sent to LLM
+  const names = result.restaurants.slice(0, 3).map(r => r.name).join(", ");
+  const more = result.restaurants.length > 3 ? ` +${result.restaurants.length - 3} more` : "";
+  createLogger("Gourmet").debug(`📤 Formatted ${result.restaurants.length} results for LLM: ${names}${more}`);
+
+  return JSON.stringify(compact);
+}
+
+/**
  * Process user text input and generate response
  */
 async function processUserInput(session: Session, userText: string): Promise<void> {
   const { ws, history, log: sessionLog } = session;
   
-  // Log user input to session file
-  sessionLog.info(`User input: "${userText}"`);
+  // Log user input to session file with user context
+  if (session.userContext) {
+    console.log(`💬 [User ${session.userContext.userId}] ${session.userContext.nickName}: "${userText.substring(0, 50)}${userText.length > 50 ? '...' : ''}"`);
+    
+    sessionLog.info(`👤 User: ${session.userContext.nickName} (ID: ${session.userContext.userId})`);
+    sessionLog.info(`💬 Message: "${userText}"`);
+    if (session.userContext.interests && session.userContext.interests.length > 0) {
+      sessionLog.debug(`🎯 User Interests: ${session.userContext.interests.join(', ')}`);
+    }
+    if (session.userContext.age) {
+      sessionLog.debug(`👶 User Age: ${session.userContext.age}歳`);
+    }
+    if (session.userContext.province) {
+      sessionLog.debug(`📍 User Location: ${session.userContext.province}`);
+    }
+  } else {
+    console.log(`💬 [Guest] "${userText.substring(0, 50)}${userText.length > 50 ? '...' : ''}"`);
+    sessionLog.info(`User input: "${userText}" (no user context)`);
+  }
   
   // Generate unique response ID for this request (for barge-in cancellation)
   const responseId = `${session.id}-${Date.now()}`;
@@ -506,15 +572,86 @@ async function processUserInput(session: Session, userText: string): Promise<voi
 
     const assistantMessageId = `assistant-${session.id}-${Date.now()}`;
 
-    // Prefetch combined movie search (DB + Google) in parallel when likely needed
-    const shouldPrefetchMovies = needsMovieSearch(userText);
-    const prefetchPromise = shouldPrefetchMovies
+    // Track found movies/gourmet for archive
+    let foundArchiveItem: ArchiveItemInfo | undefined = undefined;
+    
+    // Track all search results for frontend display
+    let allSearchResults: import("../types/index.js").SearchResults | undefined = undefined;
+
+    // Prefetch database movie search in parallel when likely needed
+    // Pass history for implicit detection (e.g., follow-up questions like "それについて教えて")
+    const shouldPrefetchMovies = needsMovieSearch(userText, history);
+    const shouldPrefetchGourmet = needsGourmetSearch(userText, history);
+    
+    const prefetchMoviePromise = shouldPrefetchMovies
       ? (async () => {
-          const prefetchTimer = startTimer("Combined Search (Prefetch)", { query: userText });
+          const prefetchTimer = startTimer("Database Search (Prefetch)", { query: userText });
           const result = await combinedMovieSearch(userText);
           const timing = prefetchTimer.stop();
           workflow.recordDbSearch(timing.durationMs);
+          
+          // Extract first movie for archive if found
+          if (result.dbResults && result.dbResults.movies && result.dbResults.movies.length > 0) {
+            const movie = result.dbResults.movies[0];
+            foundArchiveItem = {
+              itemId: movie.id?.toString() || `movie-${Date.now()}`,
+              itemTitle: movie.title_ja,
+              itemDomain: "movie" as DomainType,
+              itemData: {
+                title_en: movie.title_en,
+                description: movie.description,
+                release_year: movie.release_year,
+                rating: movie.rating,
+                director: movie.director,
+                actors: movie.actors,
+              },
+            };
+            
+            // Store all search results for frontend
+            allSearchResults = {
+              type: "movie",
+              movies: result.dbResults.movies,
+              total: result.dbResults.total,
+            };
+          }
+          
           return result.merged; // Return formatted string for LLM
+        })().catch(() => null)
+      : null;
+
+    const prefetchGourmetPromise = shouldPrefetchGourmet
+      ? (async () => {
+          const prefetchTimer = startTimer("Gourmet Search (Prefetch)", { query: userText });
+          const result = await searchGourmetRestaurants(userText);
+          const timing = prefetchTimer.stop();
+          workflow.recordDbSearch(timing.durationMs);
+          
+          // Extract first restaurant for archive if found
+          if (result.restaurants && result.restaurants.length > 0) {
+            const restaurant = result.restaurants[0];
+            foundArchiveItem = {
+              itemId: restaurant.id?.toString() || `gourmet-${Date.now()}`,
+              itemTitle: restaurant.name,
+              itemDomain: "gourmet" as DomainType,
+              itemData: {
+                code: restaurant.code,
+                address: restaurant.address,
+                catch_copy: restaurant.catch_copy,
+                urls_pc: restaurant.urls_pc,
+                open_hours: restaurant.open_hours,
+              },
+            };
+            
+            // Store all search results for frontend
+            allSearchResults = {
+              type: "gourmet",
+              restaurants: result.restaurants,
+              total: result.total,
+            };
+          }
+          
+          // Format results for LLM
+          return formatGourmetResults(result);
         })().catch(() => null)
       : null;
 
@@ -528,6 +665,11 @@ async function processUserInput(session: Session, userText: string): Promise<voi
     }
     const ttsQueue: Promise<TTSChunkResult | null>[] = [];
     let sentenceIndex = 0;
+
+    // Log if user context is being used
+    if (session.userContext) {
+      sessionLog.debug(`🎯 Using user context for personalized response (${session.userContext.nickName})`);
+    }
 
     const response = await chat(
       history,
@@ -546,14 +688,14 @@ async function processUserInput(session: Session, userText: string): Promise<voi
         //   year: year || undefined,
         // }, responseId);
 
-        // Track combined search (DB + Google) within LLM step
+        // Track database search within LLM step
         if (
-          prefetchPromise &&
+          prefetchMoviePromise &&
           query.trim() === userText.trim() &&
           !genre &&
           !year
         ) {
-          const prefetched = await prefetchPromise;
+          const prefetched = await prefetchMoviePromise;
           if (prefetched) {
             return prefetched;
           }
@@ -563,6 +705,32 @@ async function processUserInput(session: Session, userText: string): Promise<voi
         const result = await combinedMovieSearch(query, genre, year);
         const searchTiming = searchTimer.stop();
         workflow.recordDbSearch(searchTiming.durationMs);
+        
+        // Extract first movie for archive if found and not already set
+        if (!foundArchiveItem && result.dbResults && result.dbResults.movies && result.dbResults.movies.length > 0) {
+          const movie = result.dbResults.movies[0];
+          foundArchiveItem = {
+            itemId: movie.id?.toString() || `movie-${Date.now()}`,
+            itemTitle: movie.title_ja,
+            itemDomain: "movie" as DomainType,
+            itemData: {
+              title_en: movie.title_en,
+              description: movie.description,
+              release_year: movie.release_year,
+              rating: movie.rating,
+              director: movie.director,
+              actors: movie.actors,
+            },
+          };
+          
+          // Store all search results for frontend
+          allSearchResults = {
+            type: "movie",
+            movies: result.dbResults.movies,
+            total: result.dbResults.total,
+          };
+        }
+        
         return result.merged; // Return formatted string for LLM
       },
       (delta) => {
@@ -613,7 +781,58 @@ async function processUserInput(session: Session, userText: string): Promise<voi
       //   if (session.currentResponseId !== responseId) return;
       //   sendWaiting(ws);
       // }
-      undefined
+      undefined,
+      session.userContext,  // Pass user context to LLM for personalized responses
+      async (query, area, cuisine) => {
+        // Skip if response was cancelled (barge-in)
+        if (session.currentResponseId !== responseId) {
+          return ""; // Return empty to abort gracefully
+        }
+
+        // Track gourmet search within LLM step
+        if (
+          prefetchGourmetPromise &&
+          query.trim() === userText.trim() &&
+          !area &&
+          !cuisine
+        ) {
+          const prefetched = await prefetchGourmetPromise;
+          if (prefetched) {
+            return prefetched;
+          }
+        }
+
+        const searchTimer = startTimer("Gourmet Search", { query, area, cuisine });
+        const result = await searchGourmetRestaurants(query, area, cuisine);
+        const searchTiming = searchTimer.stop();
+        workflow.recordDbSearch(searchTiming.durationMs);
+        
+        // Extract first restaurant for archive if found and not already set
+        if (!foundArchiveItem && result.restaurants && result.restaurants.length > 0) {
+          const restaurant = result.restaurants[0];
+          foundArchiveItem = {
+            itemId: restaurant.id?.toString() || `gourmet-${Date.now()}`,
+            itemTitle: restaurant.name,
+            itemDomain: "gourmet" as DomainType,
+            itemData: {
+              code: restaurant.code,
+              address: restaurant.address,
+              catch_copy: restaurant.catch_copy,
+              urls_pc: restaurant.urls_pc,
+              open_hours: restaurant.open_hours,
+            },
+          };
+          
+          // Store all search results for frontend
+          allSearchResults = {
+            type: "gourmet",
+            restaurants: result.restaurants,
+            total: result.total,
+          };
+        }
+        
+        return formatGourmetResults(result); // Return formatted string for LLM
+      }
     );
 
     workflow.endStep({
@@ -622,7 +841,19 @@ async function processUserInput(session: Session, userText: string): Promise<voi
       hasToolUse: workflow.getSummary().hasDbSearch
     });
 
-    sessionLog.debug(`Tool used: ${response.usedTool ? "movie search" : "none"}`);
+    // Determine which tool was used
+    let toolUsed = "none";
+    if (response.usedTool) {
+      if (shouldPrefetchMovies) {
+        toolUsed = "movie search";
+      } else if (shouldPrefetchGourmet) {
+        toolUsed = "gourmet search";
+      } else {
+        toolUsed = "search";
+      }
+    }
+    
+    sessionLog.debug(`Tool used: ${toolUsed}`);
     sessionLog.info(`Assistant response: "${response.text}" [emotion: ${response.emotion}]`);
 
     // Check if response was cancelled (barge-in) before proceeding
@@ -631,18 +862,53 @@ async function processUserInput(session: Session, userText: string): Promise<voi
       return;
     }
 
-    // Update conversation history
-    history.push({ role: "user", content: userText });
-    history.push({ role: "assistant", content: response.text });
+    // Detect domain from user message
+    const domain = detectDomain(userText);
+    session.currentDomain = domain;
+    sessionLog.debug(`Detected domain: ${domain}`);
+
+    // Update conversation history (in-memory)
+    const userTurn: ConversationTurn = { role: "user", content: userText, domain };
+    const assistantTurn: ConversationTurn = { 
+      role: "assistant", 
+      content: response.text, 
+      domain,
+      emotion: response.emotion 
+    };
+    
+    history.push(userTurn);
+    history.push(assistantTurn);
+
+    // Save to database (async, don't block)
+    saveConversationTurn(
+      session.id, 
+      userTurn, 
+      domain, 
+      session.userId, 
+      session.userName, 
+      session.userToken
+    ).catch(err => {
+      sessionLog.error("Failed to save user turn to database:", err);
+    });
+    saveConversationTurn(
+      session.id, 
+      assistantTurn, 
+      domain, 
+      session.userId, 
+      session.userName, 
+      session.userToken
+    ).catch(err => {
+      sessionLog.error("Failed to save assistant turn to database:", err);
+    });
 
     // Limit history to last 20 turns
     if (history.length > 20) {
       history.splice(0, history.length - 20);
     }
 
-    // STEP 7: Send text response
+    // STEP 7: Send text response (with archive item info and all search results if found)
     workflow.startStep("STEP7_TEXT_RESPONSE");
-    sendAssistantMessage(ws, response.text, response.emotion, assistantMessageId);
+    sendAssistantMessage(ws, response.text, response.emotion, assistantMessageId, domain, foundArchiveItem, allSearchResults);
     session.status = "speaking";
     sendStatus(ws, "speaking", response.emotion, "話しています...");
     workflow.endStep({ textLength: response.text.length, emotion: response.emotion });
@@ -848,6 +1114,168 @@ async function handleMessage(session: Session, data: string): Promise<void> {
         break;
       }
 
+      case "set_user_info": {
+        // Get random user from database
+        session.log.info(`🎲 Fetching random user...`);
+        const userProfile = await getRandomUser();
+        
+        if (userProfile) {
+          const context = userProfileToContext(userProfile);
+          session.userId = context.userId.toString();
+          session.userName = context.nickName;
+          session.userContext = context;
+          
+          // Update logger to use actual user ID instead of "guest"
+          session.log = createUserLogger("WS", session.userId);
+          setUserId(session.userId);  // Update global context
+          
+          // Console log for visibility
+          console.log(`\n👤 User Authenticated: ${context.nickName} (ID: ${session.userId})`);
+          console.log(`   📝 Switched log file to: backend/logs/userid-${session.userId}.log`);
+          console.log(`   🎯 All future logs will append to this file\n`);
+          
+          // Detailed user info logging
+          session.log.info(`✅ Random user selected: ${context.nickName} (ID: ${context.userId})`);
+          session.log.info(`📊 User Details:`);
+          if (context.age) session.log.info(`   - Age: ${context.age}歳`);
+          if (context.gender) session.log.info(`   - Gender: ${context.gender}`);
+          if (context.province) session.log.info(`   - Location: ${context.province}`);
+          if (context.introduction) session.log.info(`   - Intro: ${context.introduction}`);
+          if (context.interests && context.interests.length > 0) {
+            session.log.info(`   - Interests: ${context.interests.join(', ')}`);
+          }
+          
+          send(session.ws, { 
+            type: "user_info_set", 
+            success: true,
+            user: context
+          });
+        } else {
+          session.log.warn(`❌ No users found in database`);
+          send(session.ws, { 
+            type: "user_info_set", 
+            success: false,
+            error: "No users available"
+          });
+        }
+        break;
+      }
+
+      case "load_history": {
+        const loadMsg = message as LoadHistoryMessage;
+        
+        if (!loadMsg.userId) {
+          session.log.warn("Invalid load_history message: missing userId");
+          sendError(session.ws, "ユーザーIDが必要です");
+          return;
+        }
+
+        try {
+          const limit = loadMsg.limit || 5;
+          session.log.info(`📜 Loading ${limit} recent history items for user ${loadMsg.userId}`);
+          
+          // Get recent conversation history for this user
+          const records = await getConversationHistoryByUserId(loadMsg.userId, undefined, limit);
+          
+          // Convert to conversation turns (reverse to get chronological order)
+          const history = recordsToTurns(records.reverse());
+          
+          session.log.info(`✅ Loaded ${history.length} history items`);
+          
+          // Send history to client
+          const historyMsg: HistoryLoadedMessage = {
+            type: "history_loaded",
+            history,
+          };
+          send(session.ws, historyMsg);
+        } catch (error) {
+          session.log.error("Failed to load history:", error);
+          sendError(session.ws, "履歴の読み込みに失敗しました");
+        }
+        break;
+      }
+
+      case "save_archive": {
+        const archiveMsg = message as SaveArchiveMessage;
+        
+        if (!archiveMsg.userId || !archiveMsg.domain || !archiveMsg.itemId) {
+          session.log.warn("Invalid save_archive message: missing required fields");
+          sendError(session.ws, "保存に必要な情報が不足しています");
+          return;
+        }
+
+        try {
+          // Save to archive
+          await saveToArchive(
+            archiveMsg.userId,
+            archiveMsg.domain,
+            archiveMsg.itemId,
+            archiveMsg.itemTitle,
+            archiveMsg.itemData
+          );
+          
+          // Get friends who also saved this item
+          const friendsMatched = await getFriendsWhoSavedItem(
+            archiveMsg.userId,
+            archiveMsg.domain,
+            archiveMsg.itemId
+          );
+          
+          session.log.info(`📚 Saved to archive: ${archiveMsg.domain}/${archiveMsg.itemId} for user ${archiveMsg.userId}, friendsMatched=${friendsMatched.length}`);
+          
+          send(session.ws, {
+            type: "archive_saved",
+            success: true,
+            message: "アーカイブに保存しました",
+            itemId: archiveMsg.itemId,
+            domain: archiveMsg.domain,
+            friends_matched: friendsMatched,
+          });
+        } catch (error) {
+          session.log.error("Failed to save to archive:", error);
+          sendError(session.ws, "アーカイブへの保存に失敗しました");
+        }
+        break;
+      }
+
+      case "request_greeting": {
+        session.log.info("👋 Greeting requested");
+        
+        // Personalized greeting if user context is available
+        let greeting = "こんにちは！";
+        if (session.userContext?.nickName) {
+          // Use user's nickname for personalized greeting
+          greeting = `やっほー、${session.userContext.nickName}！元気？`;
+          session.log.info(`📋 Personalized greeting for ${session.userContext.nickName}`);
+        } else {
+          session.log.debug("No user context available for personalization");
+        }
+        
+        sendAssistantMessage(session.ws, greeting, "happy");
+        const greetingTurn: ConversationTurn = { 
+          role: "assistant", 
+          content: greeting,
+          domain: "general",
+          emotion: "happy"
+        };
+        session.history.push(greetingTurn);
+        
+        // Save greeting to database (async, don't block)
+        saveConversationTurn(
+          session.id, 
+          greetingTurn, 
+          "general", 
+          session.userId, 
+          session.userName, 
+          session.userToken
+        ).catch(err => {
+          session.log.error("Failed to save greeting to database:", err);
+        });
+        
+        session.log.debug(`Greeting sent: "${greeting}" (text only, no audio)`);
+        break;
+      }
+
       case "ping": {
         send(session.ws, { type: "pong" });
         break;
@@ -870,8 +1298,10 @@ async function handleMessage(session: Session, data: string): Promise<void> {
 export function handleConnection(ws: WebSocket): void {
   const sessionId = uuidv4();
   
-  // Create session-specific logger (logs to logs/{sessionId}.log when DEBUG=true)
-  const sessionLog = createSessionLogger("WS", sessionId);
+  // Create user-specific logger (logs to logs/userid-{userId}.log when DEBUG=true)
+  // Initially use "guest" as userId until user authenticates
+  const initialUserId = "guest";
+  const sessionLog = createUserLogger("WS", initialUserId);
   
   const now = Date.now();
   const session: Session = {
@@ -884,10 +1314,21 @@ export function handleConnection(ws: WebSocket): void {
     lastActivityTime: now,
     requestCount: 0,
     requestWindowStart: now,
-    log: sessionLog,  // Add session-specific logger
+    log: sessionLog,  // Add user-specific logger
+    currentDomain: "general",  // Initialize with general domain
+    userId: initialUserId,  // Initialize with "guest"
   };
 
   sessions.set(sessionId, session);
+  
+  // Set global user ID for logging context
+  setUserId(initialUserId);
+  
+  // Console log for visibility
+  console.log(`\n🔌 WebSocket Connected: ${sessionId.slice(0, 8)}...`);
+  console.log(`   📝 Log file: backend/logs/userid-${initialUserId}.log`);
+  console.log(`   👤 User: ${initialUserId} (will change after auth)\n`);
+  
   log.info(`Client connected: ${sessionId}`);
   sessionLog.info("WebSocket connection established");
 
@@ -899,15 +1340,10 @@ export function handleConnection(ws: WebSocket): void {
   });
 
   // Send initial status
-  sendStatus(ws, "idle", "happy", "");
+  sendStatus(ws, "idle", "neutral", "");
 
-  // Send greeting text only (no audio to avoid overlap issues)
-  setTimeout(() => {
-    const greeting = "こんにちは！";
-    sendAssistantMessage(ws, greeting, "happy");
-    session.history.push({ role: "assistant", content: greeting });
-    sessionLog.debug("Greeting sent (text only, no audio)");
-  }, 500);
+  // Don't send greeting immediately - wait for frontend to load history first
+  // Frontend will request greeting after history is loaded
 
   // Handle incoming messages
   ws.on("message", (data) => {
@@ -916,6 +1352,7 @@ export function handleConnection(ws: WebSocket): void {
 
   // Handle close
   ws.on("close", () => {
+    clearUserId();  // Clear global user ID context
     sessions.delete(sessionId);
     log.info(`Client disconnected: ${sessionId}`);
     sessionLog.info("WebSocket connection closed");

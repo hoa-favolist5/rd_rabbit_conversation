@@ -2,6 +2,11 @@
 
 import { useRef, useCallback, useEffect } from "react";
 import { createLogger } from "@/utils/logger";
+import {
+  getWaitingBuffer,
+  playAudioBuffer,
+  getSharedAudioContext,
+} from "@/utils/audioUnlock";
 
 const log = createLogger("WaitingPhrase");
 
@@ -11,7 +16,7 @@ interface UseWaitingPhraseOptions {
 }
 
 interface UseWaitingPhraseReturn {
-  startWaitingTimer: () => void;
+  startWaitingTimer: (shouldPlay?: boolean) => void;  // Optional condition to control playback
   cancelWaitingTimer: () => boolean;  // Returns true if cancelled, false if already playing
   stopWaitingPhrase: () => void;
   isWaitingPhrasePlaying: () => boolean;
@@ -25,11 +30,11 @@ interface UseWaitingPhraseReturn {
  * Behavior:
  * - Response < 1s: NO waiting sound (play immediately)
  * - Response > 1s: Play SHORT waiting sound first
- *   - Uses /waiting-short/0-9.mp3
+ *   - Uses /waiting-short/0-19.mp3 (pre-loaded AudioBuffers)
  *   - Examples: "ああ" (ah), "うん" (un), "えっと" (etto)
  *   - Protected: cannot be interrupted once started
  *   - After completion, waits POST_WAITING_DELAY before backend audio
- * 
+ *
  * LONG waiting phrases (/waiting/0-19.mp3) are now DEPRECATED
  * Replaced by:
  * - Short sounds for > 1s responses
@@ -37,7 +42,7 @@ interface UseWaitingPhraseReturn {
  */
 export function useWaitingPhrase({ onWaitingComplete, onWaitingStart }: UseWaitingPhraseOptions = {}): UseWaitingPhraseReturn {
   const waitingTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const waitingAudioRef = useRef<HTMLAudioElement | null>(null);
+  const waitingSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const isPlayingRef = useRef(false);
   const postWaitingTimerRef = useRef<NodeJS.Timeout | null>(null);  // Track post-waiting delay timer
   const requestIdRef = useRef(0);  // Track request ID for race condition prevention
@@ -51,9 +56,20 @@ export function useWaitingPhrase({ onWaitingComplete, onWaitingStart }: UseWaiti
     process.env.NEXT_PUBLIC_POST_WAITING_DELAY || "400",
     10
   );
-  
+
   // Short waiting configuration
   const SHORT_WAITING_COUNT = 20;  // Number of short waiting sounds (0-19.mp3)
+
+  // Safely stop an AudioBufferSourceNode
+  const stopSource = useCallback((source: AudioBufferSourceNode | null) => {
+    if (source) {
+      try {
+        source.stop();
+      } catch {
+        // Already stopped — ignore
+      }
+    }
+  }, []);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -64,18 +80,18 @@ export function useWaitingPhrase({ onWaitingComplete, onWaitingStart }: UseWaiti
       if (postWaitingTimerRef.current) {
         clearTimeout(postWaitingTimerRef.current);
       }
-      if (waitingAudioRef.current) {
-        waitingAudioRef.current.pause();
-        waitingAudioRef.current = null;
-      }
+      stopSource(waitingSourceRef.current);
+      waitingSourceRef.current = null;
     };
-  }, []);
+  }, [stopSource]);
 
   /**
    * Start the waiting timer after user submits message
    * If backend doesn't respond within threshold, play waiting phrase
+   * @param shouldPlay - Optional condition to control playback (default: true)
+   *                     Set to false for traditional conversation (no database operations)
    */
-  const startWaitingTimer = useCallback(() => {
+  const startWaitingTimer = useCallback((shouldPlay: boolean = true) => {
     // Increment request ID for race condition prevention
     const currentRequestId = ++requestIdRef.current;
 
@@ -90,102 +106,98 @@ export function useWaitingPhrase({ onWaitingComplete, onWaitingStart }: UseWaiti
     }
 
     // Stop any existing audio
-    if (waitingAudioRef.current) {
-      waitingAudioRef.current.pause();
-      waitingAudioRef.current = null;
-    }
+    stopSource(waitingSourceRef.current);
+    waitingSourceRef.current = null;
     isPlayingRef.current = false;
 
-    log.debug(`⏰ Starting waiting timer (${waitingThreshold}ms threshold) [request #${currentRequestId}]`);
+    // If shouldPlay is false, skip waiting phrase entirely
+    if (!shouldPlay) {
+      log.debug(`Skipping waiting timer (traditional conversation detected) [request #${currentRequestId}]`);
+      return;
+    }
+
+    log.debug(`Starting waiting timer (${waitingThreshold}ms threshold) [request #${currentRequestId}]`);
 
     // Start timer
     waitingTimerRef.current = setTimeout(() => {
       // Race condition check: ensure this is still the current request
       if (currentRequestId !== requestIdRef.current) {
-        log.debug(`⏳ Ignoring stale waiting timer [request #${currentRequestId}]`);
+        log.debug(`Ignoring stale waiting timer [request #${currentRequestId}]`);
         return;
       }
 
       // 90% chance to skip waiting sound (silent waiting)
       const shouldPlaySound = Math.random() < 0.99;
-      
+
       if (!shouldPlaySound) {
-        log.debug("⏳ Threshold exceeded (>1s) - skipping waiting sound (50% chance)");
+        log.debug("Threshold exceeded (>1s) - skipping waiting sound (50% chance)");
         // Skip waiting sound but still trigger completion after delay
         postWaitingTimerRef.current = setTimeout(() => {
           postWaitingTimerRef.current = null;  // Clear ref so isWaitingPhrasePlaying() returns false
           if (currentRequestId === requestIdRef.current) {
-            log.debug(`✅ Silent waiting delay complete - triggering onWaitingComplete()`);
+            log.debug(`Silent waiting delay complete - triggering onWaitingComplete()`);
             onWaitingComplete?.();
           }
         }, postWaitingDelay);
         return;
       }
 
-      log.debug("⏳ Threshold exceeded (>1s) - playing SHORT waiting sound (50% chance)");
+      log.debug("Threshold exceeded (>1s) - playing SHORT waiting sound");
 
       // Notify parent that waiting phrase is starting (activate protection mode)
       onWaitingStart?.();
 
-      // Select random SHORT waiting sound (0-9)
+      // Select random SHORT waiting sound (0-19) from pre-loaded cache
       const randomIndex = Math.floor(Math.random() * SHORT_WAITING_COUNT);
-      const audio = new Audio(`/waiting-short/${randomIndex}.mp3`);
+      const buffer = getWaitingBuffer(randomIndex);
 
-      // Set volume to match A.I. speaking volume (louder)
-      audio.volume = 1.0; // Maximum volume (0.0 to 1.0)
+      if (!buffer) {
+        log.warn(`Waiting buffer ${randomIndex} not preloaded, skipping`);
+        if (currentRequestId === requestIdRef.current) {
+          onWaitingComplete?.();
+        }
+        return;
+      }
 
-      waitingAudioRef.current = audio;
+      // Resume AudioContext if needed
+      const ctx = getSharedAudioContext();
+      if (ctx.state === "suspended") {
+        ctx.resume();
+      }
 
-      // Set up event handlers BEFORE playing
-      audio.onended = () => {
+      // Play via Web Audio API AudioBufferSourceNode
+      const { source } = playAudioBuffer(buffer);
+      waitingSourceRef.current = source;
+
+      // Mark as playing IMMEDIATELY to prevent race condition
+      isPlayingRef.current = true;
+
+      // Set up event handlers
+      source.onended = () => {
         // Race condition check
         if (currentRequestId !== requestIdRef.current) {
-          log.debug(`✅ Ignoring ended event from stale request [#${currentRequestId}]`);
+          log.debug(`Ignoring ended event from stale request [#${currentRequestId}]`);
           return;
         }
 
-        log.debug(`✅ Waiting phrase audio ended, starting ${postWaitingDelay}ms POST_WAITING_DELAY...`);
+        log.debug(`Waiting phrase audio ended, starting ${postWaitingDelay}ms POST_WAITING_DELAY...`);
         isPlayingRef.current = false;
-        waitingAudioRef.current = null;
+        waitingSourceRef.current = null;
 
         // Apply post-waiting delay before allowing backend audio
-        // This ensures smooth transition and prevents audio overlap
         postWaitingTimerRef.current = setTimeout(() => {
           postWaitingTimerRef.current = null;  // Clear ref so isWaitingPhrasePlaying() returns false
           // Race condition check
           if (currentRequestId !== requestIdRef.current) {
-            log.debug(`✅ Ignoring post-delay callback from stale request [#${currentRequestId}]`);
+            log.debug(`Ignoring post-delay callback from stale request [#${currentRequestId}]`);
             return;
           }
-          log.debug(`✅ ${postWaitingDelay}ms POST_WAITING_DELAY complete - triggering onWaitingComplete()`);
+          log.debug(`${postWaitingDelay}ms POST_WAITING_DELAY complete - triggering onWaitingComplete()`);
           onWaitingComplete?.();
         }, postWaitingDelay);
       };
-
-      audio.onerror = (err) => {
-        log.warn(`Failed to play short waiting audio #${randomIndex}`, err);
-        isPlayingRef.current = false;
-        waitingAudioRef.current = null;
-        if (currentRequestId === requestIdRef.current) {
-          onWaitingComplete?.();
-        }
-      };
-
-      // Mark as playing IMMEDIATELY (before async play) to prevent race condition
-      // where backend audio arrives before play() Promise resolves
-      isPlayingRef.current = true;
-
-      audio.play()
-        .catch((err) => {
-          log.warn("Failed to play waiting audio", err);
-          isPlayingRef.current = false;
-          waitingAudioRef.current = null;
-          if (currentRequestId === requestIdRef.current) {
-            onWaitingComplete?.();
-          }
-        });
     }, waitingThreshold);
-  }, [waitingThreshold, postWaitingDelay, onWaitingComplete, onWaitingStart]);
+  }, [waitingThreshold, postWaitingDelay, onWaitingComplete, onWaitingStart, stopSource]);
 
   /**
    * Cancel the waiting timer (backend responded quickly)
@@ -195,18 +207,18 @@ export function useWaitingPhrase({ onWaitingComplete, onWaitingStart }: UseWaiti
   const cancelWaitingTimer = useCallback(() => {
     // If waiting phrase is already playing, cannot cancel
     if (isPlayingRef.current) {
-      log.debug("⏳ Waiting phrase already playing - cannot cancel");
+      log.debug("Waiting phrase already playing - cannot cancel");
       return false;
     }
-    
+
     // Cancel timer if it exists
     if (waitingTimerRef.current) {
-      log.debug("⚡ Backend responded quickly - canceling waiting timer");
+      log.debug("Backend responded quickly - canceling waiting timer");
       clearTimeout(waitingTimerRef.current);
       waitingTimerRef.current = null;
       return true;
     }
-    
+
     return false;
   }, []);
 
@@ -232,13 +244,13 @@ export function useWaitingPhrase({ onWaitingComplete, onWaitingStart }: UseWaiti
     }
 
     // Stop audio if playing (for barge-in only)
-    if (waitingAudioRef.current) {
-      log.debug("🔇 Stopping waiting phrase (barge-in)");
-      waitingAudioRef.current.pause();
-      waitingAudioRef.current = null;
+    if (waitingSourceRef.current) {
+      log.debug("Stopping waiting phrase (barge-in)");
+      stopSource(waitingSourceRef.current);
+      waitingSourceRef.current = null;
       isPlayingRef.current = false;
     }
-  }, []);
+  }, [stopSource]);
 
   /**
    * Check if waiting phrase is currently playing OR in post-delay period
@@ -254,7 +266,7 @@ export function useWaitingPhrase({ onWaitingComplete, onWaitingStart }: UseWaiti
    * Used before processing backend audio to ensure no overlap
    */
   const forceStopAudio = useCallback(() => {
-    log.debug("🛑 Force stopping waiting phrase audio");
+    log.debug("Force stopping waiting phrase audio");
 
     // Increment request ID to invalidate any pending callbacks
     requestIdRef.current++;
@@ -271,36 +283,38 @@ export function useWaitingPhrase({ onWaitingComplete, onWaitingStart }: UseWaiti
       postWaitingTimerRef.current = null;
     }
 
-    // Stop and clear audio element
-    if (waitingAudioRef.current) {
-      waitingAudioRef.current.pause();
-      waitingAudioRef.current.currentTime = 0;  // Reset to start
-      waitingAudioRef.current.src = '';  // Clear source
-      waitingAudioRef.current = null;
-    }
+    // Stop AudioBufferSourceNode
+    stopSource(waitingSourceRef.current);
+    waitingSourceRef.current = null;
 
     isPlayingRef.current = false;
-  }, []);
+  }, [stopSource]);
 
   /**
    * Play a short waiting sound (< 1s acknowledgment)
    * Used when backend responds quickly but needs brief acknowledgment
    */
   const playShortWaiting = useCallback(() => {
-    log.debug("🔊 Playing short waiting sound");
-    
-    // Select random short waiting sound (0-9)
+    log.debug("Playing short waiting sound");
+
+    // Select random short waiting sound (0-19) from pre-loaded cache
     const randomIndex = Math.floor(Math.random() * SHORT_WAITING_COUNT);
-    const audio = new Audio(`/waiting-short/${randomIndex}.mp3`);
-    
-    // Set volume to match other audio
-    audio.volume = 1.0;
-    
-    // Play immediately (non-blocking, no protection)
-    audio.play().catch((err) => {
-      log.warn("Failed to play short waiting sound", err);
-    });
-    
+    const buffer = getWaitingBuffer(randomIndex);
+
+    if (!buffer) {
+      log.warn(`Waiting buffer ${randomIndex} not preloaded, skipping`);
+      return;
+    }
+
+    // Resume AudioContext if needed
+    const ctx = getSharedAudioContext();
+    if (ctx.state === "suspended") {
+      ctx.resume();
+    }
+
+    // Play immediately (non-blocking, no protection) via Web Audio API
+    playAudioBuffer(buffer);
+
     // No state tracking needed - these are fire-and-forget
   }, [SHORT_WAITING_COUNT]);
 
