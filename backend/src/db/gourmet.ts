@@ -1,4 +1,3 @@
-import { pool } from "./connection.js";
 import type { GourmetRestaurant, GourmetSearchResult } from "../types/index.js";
 import { createLogger } from "../utils/logger.js";
 
@@ -7,6 +6,10 @@ const log = createLogger("Gourmet");
 const GOURMET_CACHE_TTL_MS = 2 * 60 * 1000;
 const GOURMET_CACHE_LIMIT = 200;
 const gourmetSearchCache = new Map<string, { value: GourmetSearchResult; timestamp: number }>();
+
+// OpenSearch API configuration
+const OPENSEARCH_API_URL = "https://stg.opensearch.lovvit.jp/api/v1/restaurant/search";
+const OPENSEARCH_API_KEY = "AKIAXN7E3HWLGDV4JNWN";
 
 function getCacheKey(query: string, area?: string, cuisine?: string): string {
   return `${query.trim().toLowerCase()}|${area || ""}|${cuisine || ""}`;
@@ -33,7 +36,7 @@ function setCachedResult(key: string, value: GourmetSearchResult): void {
 }
 
 /**
- * Search gourmet restaurants by query, area, and/or cuisine type
+ * Search gourmet restaurants by query, area, and/or cuisine type using OpenSearch API
  */
 export async function searchGourmetRestaurants(
   query: string,
@@ -48,106 +51,96 @@ export async function searchGourmetRestaurants(
       return cached;
     }
 
-    log.debug(`Gourmet search: query="${query}", area="${area || ""}", cuisine="${cuisine || ""}"`);
+    log.debug(`Gourmet search via API: query="${query}", area="${area || ""}", cuisine="${cuisine || ""}"`);
 
-    // Query the production table data_archive_gourmet_restaurant
-    // Columns: id, code, name, name_short, search_full, name_kana, address, 
-    //          lat, lng, catch_copy, capacity, access, urls_pc, open_hours, etc.
-    let sql = `
-      SELECT
-        id,
-        code,
-        name,
-        name_short,
-        address,
-        lat,
-        lng,
-        catch_copy,
-        capacity,
-        access,
-        urls_pc,
-        open_hours,
-        close_days,
-        budget_id
-      FROM data_archive_gourmet_restaurant
-      WHERE 1=1
-    `;
-    const params: (string | number)[] = [];
-    let paramIndex = 1;
-
-    // Full-text search on name, address, and search_full
-    if (query && query.trim().length > 0) {
-      sql += ` AND (
-        name ILIKE $${paramIndex} OR 
-        name_short ILIKE $${paramIndex} OR
-        address ILIKE $${paramIndex} OR
-        search_full ILIKE $${paramIndex} OR
-        catch_copy ILIKE $${paramIndex}
-      )`;
-      params.push(`%${query}%`);
-      paramIndex++;
+    // Build search query combining all search parameters
+    let searchQuery = query || "";
+    if (area) {
+      searchQuery = searchQuery ? `${searchQuery} ${area}` : area;
+    }
+    if (cuisine) {
+      searchQuery = searchQuery ? `${searchQuery} ${cuisine}` : cuisine;
     }
 
-    // Filter by area (address contains the area name)
-    if (area && area.trim().length > 0) {
-      sql += ` AND address ILIKE $${paramIndex}`;
-      params.push(`%${area}%`);
-      paramIndex++;
+    // Call OpenSearch API
+    const response = await fetch(OPENSEARCH_API_URL, {
+      method: "POST",
+      headers: {
+        "accept": "application/json",
+        "Content-Type": "application/json",
+        "X-API-Key": OPENSEARCH_API_KEY,
+      },
+      body: JSON.stringify({
+        query: searchQuery,
+        pagination: {
+          page: 1,
+          limit: 25,
+        },
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`API request failed: ${response.status} ${response.statusText}`);
     }
 
-    // Filter by cuisine type (name or catch_copy contains cuisine)
-    if (cuisine && cuisine.trim().length > 0) {
-      sql += ` AND (name ILIKE $${paramIndex} OR catch_copy ILIKE $${paramIndex})`;
-      params.push(`%${cuisine}%`);
-      paramIndex++;
-    }
+    const data = await response.json();
 
-    // Order by priority: has catch_copy first, then alphabetically
-    // Limit results to top 10
-    sql += ` ORDER BY 
-      CASE WHEN catch_copy IS NOT NULL AND catch_copy != '' THEN 0 ELSE 1 END,
-      name ASC
-      LIMIT 10`;
-
-    const result = await pool.query(sql, params);
-
-    // Map to GourmetRestaurant interface
-    const restaurants: GourmetRestaurant[] = result.rows.map((row) => ({
-      id: row.id || null,
-      code: row.code || null,
-      name: row.name || "",
-      name_short: row.name_short || null,
-      address: row.address || null,
-      lat: row.lat ? parseFloat(row.lat) : null,
-      lng: row.lng ? parseFloat(row.lng) : null,
-      catch_copy: row.catch_copy || null,
-      capacity: row.capacity || null,
-      access: row.access || null,
-      urls_pc: row.urls_pc || null,
-      open_hours: row.open_hours || null,
-      close_days: row.close_days || null,
-      budget_id: row.budget_id || null,
+    // Map API response to GourmetRestaurant interface
+    // Adjust the mapping based on the actual API response structure
+    const restaurants: GourmetRestaurant[] = (data.results || data.restaurants || []).map((item: any) => ({
+      id: item.id || null,
+      code: item.code || null,
+      name: item.name || "",
+      name_short: item.name_short || item.nameShort || null,
+      address: item.address || null,
+      lat: item.lat || item.latitude ? parseFloat(item.lat || item.latitude) : null,
+      lng: item.lng || item.longitude ? parseFloat(item.lng || item.longitude) : null,
+      catch_copy: item.catch_copy || item.catchCopy || null,
+      capacity: item.capacity || null,
+      access: item.access || null,
+      urls_pc: item.urls_pc || item.urlsPc || item.url || null,
+      open_hours: item.open_hours || item.openHours || null,
+      close_days: item.close_days || item.closeDays || null,
+      budget_id: item.budget_id || item.budgetId || null,
     }));
 
-    const response = {
-      restaurants,
-      total: restaurants.length,
+    // Apply client-side filtering if needed
+    let filteredRestaurants = restaurants;
+    
+    // Filter by area if specified (check if address contains area)
+    if (area && area.trim().length > 0) {
+      filteredRestaurants = filteredRestaurants.filter(r => 
+        r.address?.toLowerCase().includes(area.toLowerCase())
+      );
+    }
+    
+    // Filter by cuisine if specified (check if name or catch_copy contains cuisine)
+    if (cuisine && cuisine.trim().length > 0) {
+      filteredRestaurants = filteredRestaurants.filter(r => 
+        r.name?.toLowerCase().includes(cuisine.toLowerCase()) ||
+        r.catch_copy?.toLowerCase().includes(cuisine.toLowerCase())
+      );
+    }
+
+    const result = {
+      restaurants: filteredRestaurants,
+      total: filteredRestaurants.length,
     };
     
     // Log search results summary
-    if (restaurants.length > 0) {
-      const names = restaurants.slice(0, 3).map(r => r.name).join(", ");
-      const more = restaurants.length > 3 ? ` +${restaurants.length - 3} more` : "";
-      log.debug(`✅ Found ${restaurants.length} restaurants: ${names}${more}`);
+    if (filteredRestaurants.length > 0) {
+      const names = filteredRestaurants.slice(0, 3).map(r => r.name).join(", ");
+      const more = filteredRestaurants.length > 3 ? ` +${filteredRestaurants.length - 3} more` : "";
+      log.debug(`✅ Found ${filteredRestaurants.length} restaurants: ${names}${more}`);
     } else {
       log.debug(`❌ No restaurants found for query: "${query}"`);
     }
     
-    setCachedResult(cacheKey, response);
-    return response;
+    setCachedResult(cacheKey, result);
+    return result;
   } catch (error) {
-    log.error("Gourmet search error:", error);
-    // Return empty result on error (database might not be set up)
+    log.error("Gourmet search API error:", error);
+    // Return empty result on error
     return { restaurants: [], total: 0 };
   }
 }

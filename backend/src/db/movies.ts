@@ -1,6 +1,4 @@
-import { pool } from "./connection.js";
 import type { Movie, MovieSearchResult } from "../types/index.js";
-import { expandSearchQuery } from "../utils/crossLanguageSearch.js";
 import { createLogger } from "../utils/logger.js";
 
 const log = createLogger("Movies");
@@ -8,6 +6,10 @@ const log = createLogger("Movies");
 const MOVIE_CACHE_TTL_MS = 2 * 60 * 1000;
 const MOVIE_CACHE_LIMIT = 200;
 const movieSearchCache = new Map<string, { value: MovieSearchResult; timestamp: number }>();
+
+// OpenSearch API configuration
+const OPENSEARCH_API_URL = "https://stg.opensearch.lovvit.jp/api/v1/movie/search";
+const OPENSEARCH_API_KEY = "AKIAXN7E3HWLGDV4JNWN";
 
 function getCacheKey(query: string, genre?: string, year?: number): string {
   return `${query.trim().toLowerCase()}|${genre || ""}|${year || ""}`;
@@ -34,7 +36,7 @@ function setCachedResult(key: string, value: MovieSearchResult): void {
 }
 
 /**
- * Search movies by query, genre, and/or year
+ * Search movies by query, genre, and/or year using OpenSearch API
  */
 export async function searchMovies(
   query: string,
@@ -47,85 +49,70 @@ export async function searchMovies(
     if (cached) {
       return cached;
     }
-    // Expand query to include cross-language variants (English ↔ Japanese)
-    // Example: "matrix" -> ["matrix", "マトリックス"]
-    const searchTerms = query ? expandSearchQuery(query) : [];
 
-    log.debug(`Movie search: "${query}" -> [${searchTerms.join(", ")}]`);
+    log.debug(`Movie search via API: "${query}"`);
 
-    // Query the production table data_archive_movie_master
-    // Columns: id, title, overview, release_date, vote_average
-    let sql = `
-      SELECT
-        id,
-        title,
-        overview,
-        release_date,
-        vote_average
-      FROM data_archive_movie_master
-      WHERE 1=1
-    `;
-    const params: (string | number)[] = [];
-    let paramIndex = 1;
+    // Call OpenSearch API
+    const response = await fetch(OPENSEARCH_API_URL, {
+      method: "POST",
+      headers: {
+        "accept": "application/json",
+        "Content-Type": "application/json",
+        "X-API-Key": OPENSEARCH_API_KEY,
+      },
+      body: JSON.stringify({
+        query: query || "",
+        pagination: {
+          page: 1,
+          limit: 25,
+        },
+      }),
+    });
 
-    // Full-text search on title and overview with cross-language expansion
-    if (searchTerms.length > 0) {
-      // Build OR conditions for all search term variants
-      const conditions = searchTerms.map(() => {
-        const idx = paramIndex++;
-        return `(title ILIKE $${idx} OR overview ILIKE $${idx})`;
-      });
-      sql += ` AND (${conditions.join(" OR ")})`;
-
-      // Add parameters for each search term
-      searchTerms.forEach(term => {
-        params.push(`%${term}%`);
-      });
+    if (!response.ok) {
+      throw new Error(`API request failed: ${response.status} ${response.statusText}`);
     }
 
-    // Filter by year (extract year from release_date)
-    if (year) {
-      sql += ` AND EXTRACT(YEAR FROM release_date) = $${paramIndex}`;
-      params.push(year);
-      paramIndex++;
-    }
+    const data = await response.json();
 
-    // Order by rating and limit results
-    sql += ` ORDER BY vote_average DESC NULLS LAST LIMIT 10`;
-
-    const result = await pool.query(sql, params);
-
-    // Map to Movie interface - align with actual column names
-    const movies: Movie[] = result.rows.map((row) => ({
-      id: row.id || null,
-      title_ja: row.title || "",           // title -> title_ja
-      title_en: null,                       // Not available in this table
-      description: row.overview || "",      // overview -> description
-      release_year: row.release_date ? new Date(row.release_date).getFullYear() : null,
-      rating: row.vote_average ? parseFloat(row.vote_average) : null,
-      director: null,                       // Not available in this table
-      actors: [],                           // Not available in this table
+    // Map API response to Movie interface
+    // Adjust the mapping based on the actual API response structure
+    const movies: Movie[] = (data.results || data.movies || []).map((item: any) => ({
+      id: item.id || item.movie_id || null,
+      title_ja: item.title_ja || item.title || "",
+      title_en: item.title_en || null,
+      description: item.description || item.overview || "",
+      release_year: item.release_year || (item.release_date ? new Date(item.release_date).getFullYear() : null),
+      rating: item.rating || item.vote_average || null,
+      director: item.director || null,
+      actors: item.actors || [],
     }));
 
-    const response = {
-      movies,
-      total: movies.length,
+    // Apply year filter if specified (client-side filtering)
+    let filteredMovies = movies;
+    if (year) {
+      filteredMovies = movies.filter(m => m.release_year === year);
+    }
+
+    const result = {
+      movies: filteredMovies,
+      total: filteredMovies.length,
     };
     
     // Log search results summary
-    if (movies.length > 0) {
-      const titles = movies.slice(0, 3).map(m => m.title_ja).join(", ");
-      const more = movies.length > 3 ? ` +${movies.length - 3} more` : "";
-      log.debug(`✅ Found ${movies.length} movies: ${titles}${more}`);
+    if (filteredMovies.length > 0) {
+      const titles = filteredMovies.slice(0, 3).map(m => m.title_ja).join(", ");
+      const more = filteredMovies.length > 3 ? ` +${filteredMovies.length - 3} more` : "";
+      log.debug(`✅ Found ${filteredMovies.length} movies: ${titles}${more}`);
     } else {
       log.debug(`❌ No movies found for query: "${query}"`);
     }
     
-    setCachedResult(cacheKey, response);
-    return response;
+    setCachedResult(cacheKey, result);
+    return result;
   } catch (error) {
-    log.error("Movie search error:", error);
-    // Return empty result on error (database might not be set up)
+    log.error("Movie search API error:", error);
+    // Return empty result on error
     return { movies: [], total: 0 };
   }
 }

@@ -11,6 +11,19 @@ import type {
   DomainType,
   SaveArchiveMessage,
   FriendMatch,
+  // New message types from shared package
+  ResponseMessage,
+  StatusMessage,
+  AudioMessage,
+  ErrorMessage,
+  VoiceEventMessage,
+  // Type guards
+  isResponseMessage,
+  isStatusMessage,
+  isAudioMessage,
+  isErrorMessage,
+  // Helper functions for creating messages
+  createVoiceEventMessage,
 } from "@/types";
 
 const log = createLogger("WebSocket");
@@ -77,6 +90,8 @@ interface UseWebSocketReturn {
   loadHistory: (userId: string, limit?: number) => void;
   requestGreeting: () => void;
   saveToArchive: (userId: string, domain: DomainType, itemId: string, itemTitle?: string, itemData?: Record<string, unknown>) => void;
+  // New method using unified message format
+  sendVoiceEvent: (event: VoiceEventMessage) => void;
 }
 
 export function useWebSocket({
@@ -446,6 +461,159 @@ export function useWebSocket({
           // Heartbeat response
           break;
 
+        // ================================================================
+        // New message types from shared package
+        // These are the improved communication patterns
+        // ================================================================
+        
+        case "response": {
+          // New unified response message
+          const responseMsg = message as unknown as ResponseMessage;
+          const { rabbit, text, component, context, extra } = responseMsg;
+          
+          // Update rabbit state
+          if (rabbit) {
+            setStatus(rabbit.status);
+            setEmotion(rabbit.emotion);
+          }
+          
+          // Handle text content
+          if (text) {
+            if (text.isStreaming) {
+              // Streaming delta - update existing message
+              if (requestStartTimeRef.current && !firstResponseTimeRef.current) {
+                firstResponseTimeRef.current = performance.now();
+                const ttfr = Math.round(firstResponseTimeRef.current - requestStartTimeRef.current);
+                log.debug(`⚡ Time to First Response (new format): ${ttfr}ms`);
+                onBackendResponse?.();
+              }
+              
+              setMessages((prev) => {
+                const index = prev.findIndex((m) => m.id === text.messageId);
+                if (index >= 0) {
+                  const updated = [...prev];
+                  updated[index] = {
+                    ...updated[index],
+                    content: `${updated[index].content}${text.content}`,
+                  };
+                  return updated;
+                }
+                return [
+                  ...prev,
+                  {
+                    id: text.messageId,
+                    role: "assistant",
+                    content: text.content,
+                    emotion: rabbit?.emotion,
+                    timestamp: new Date(),
+                    domain: context?.domain,
+                  },
+                ];
+              });
+            } else {
+              // Complete message
+              setMessages((prev) => {
+                const index = prev.findIndex((m) => m.id === text.messageId);
+                
+                // Build search results from component data
+                let searchResults = undefined;
+                if (component?.type === "movie_list" && component.data) {
+                  const data = component.data as { movies: any[]; total: number };
+                  searchResults = { type: "movie" as const, movies: data.movies, total: data.total };
+                } else if (component?.type === "gourmet_list" && component.data) {
+                  const data = component.data as { restaurants: any[]; total: number };
+                  searchResults = { type: "gourmet" as const, restaurants: data.restaurants, total: data.total };
+                }
+                
+                if (index >= 0) {
+                  const updated = [...prev];
+                  updated[index] = {
+                    ...updated[index],
+                    content: text.content,
+                    emotion: rabbit?.emotion,
+                    domain: context?.domain,
+                    archiveItem: extra?.archiveItem,
+                    searchResults,
+                  };
+                  return updated;
+                }
+                return [
+                  ...prev,
+                  {
+                    id: text.messageId,
+                    role: "assistant",
+                    content: text.content,
+                    emotion: rabbit?.emotion,
+                    timestamp: new Date(),
+                    domain: context?.domain,
+                    messageId: text.messageId,
+                    archiveItem: extra?.archiveItem,
+                    searchResults,
+                  },
+                ];
+              });
+            }
+          }
+          break;
+        }
+        
+        case "audio": {
+          // New unified audio message (not legacy "audio")
+          // Check if it's the new format by looking for nested audio object
+          const audioMsg = message as unknown as AudioMessage;
+          if (audioMsg.audio && typeof audioMsg.audio === "object") {
+            const { audio, text: audioText, responseId } = audioMsg;
+            
+            // Record time to first audio
+            if (requestStartTimeRef.current && !firstAudioTimeRef.current) {
+              firstAudioTimeRef.current = performance.now();
+              const ttfa = Math.round(firstAudioTimeRef.current - requestStartTimeRef.current);
+              log.debug(`🔊 Time to First Audio (new format): ${ttfa}ms`);
+              onBackendResponse?.();
+            }
+            
+            if (audio.isChunked && audio.chunk) {
+              // Chunked audio
+              onAudioChunk?.({
+                data: audio.data,
+                format: audio.format,
+                index: audio.chunk.index,
+                total: audio.chunk.total,
+                isLast: audio.chunk.isLast,
+                responseId,
+              });
+            } else {
+              // Full audio (protected or not)
+              onAudio?.(audio.data, audio.format, responseId, audio.isProtected);
+            }
+          } else {
+            // Legacy audio format - handle as before
+            if (requestStartTimeRef.current && !firstAudioTimeRef.current) {
+              firstAudioTimeRef.current = performance.now();
+              const ttfa = Math.round(firstAudioTimeRef.current - requestStartTimeRef.current);
+              log.debug(`🔊 Time to First Audio: ${ttfa}ms`);
+            }
+            const audioResponseId = message.responseId as string | undefined;
+            log.debug(`📨 Received full audio message (responseId: ${audioResponseId ? audioResponseId.slice(-8) : 'none'})`);
+            onAudio?.(message.data as string, message.format as string, audioResponseId);
+          }
+          break;
+        }
+        
+        case "error": {
+          // Check if it's the new format
+          const errorMsg = message as unknown as ErrorMessage;
+          if (errorMsg.error && typeof errorMsg.error === "object") {
+            // New error format
+            setError(errorMsg.error.message);
+            log.error(`Error [${errorMsg.error.code}]: ${errorMsg.error.message} (recoverable: ${errorMsg.error.recoverable})`);
+          } else {
+            // Legacy error format
+            setError(message.message as string);
+          }
+          break;
+        }
+
         default:
           log.debug("Unknown message type:", message.type);
       }
@@ -572,6 +740,16 @@ export function useWebSocket({
     }
   }, []);
 
+  // Send voice event using the new unified message format
+  const sendVoiceEvent = useCallback((event: VoiceEventMessage) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      log.debug(`📤 Sending voice_event: ${event.event.name}`);
+      wsRef.current.send(JSON.stringify(event));
+    } else {
+      log.warn("⚠️ Cannot send voice event: WebSocket not connected");
+    }
+  }, []);
+
   // Connect on mount
   useEffect(() => {
     connect();
@@ -636,5 +814,6 @@ export function useWebSocket({
     loadHistory,
     requestGreeting,
     saveToArchive,
+    sendVoiceEvent,
   };
 }

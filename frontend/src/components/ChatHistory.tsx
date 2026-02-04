@@ -2,8 +2,6 @@
 
 import React, { useEffect, useRef, memo, useCallback, useMemo } from "react";
 import type { ChatMessage, EmotionType, DomainType, ArchiveItemInfo, FriendMatch, SearchResults as SearchResultsType } from "@/types";
-import { MovieCard } from "./MovieCard";
-import { GourmetCard } from "./GourmetCard";
 import { useArchiveStorage } from "@/hooks/useArchiveStorage";
 import styles from "./ChatHistory.module.css";
 
@@ -11,6 +9,8 @@ interface ChatHistoryProps {
   messages: ChatMessage[];
   userId: string | null;
   onSaveToArchive?: (userId: string, domain: DomainType, itemId: string, itemTitle?: string, itemData?: Record<string, unknown>) => void;
+  /** If true, show only text messages (hide search results) */
+  textOnly?: boolean;
 }
 
 // Move constant outside component to avoid recreation on each render
@@ -50,6 +50,7 @@ interface MessageItemProps {
   isSavedFn: (itemId: string, domain: DomainType) => boolean;
   getFriendsMatchedFn: (itemId: string, domain: DomainType) => FriendMatch[];
   archiveVersion: number; // Version number to force re-renders when archive changes
+  textOnly?: boolean; // If true, render only text (no search results)
 }
 
 const MessageItem = memo(
@@ -68,9 +69,27 @@ const MessageItem = memo(
     isSavedFn,
     getFriendsMatchedFn,
     archiveVersion, // Used to detect archive changes
+    textOnly = false, // Default to showing all content
   }: MessageItemProps) {
     // Check if this is a movie/gourmet message with search results
     const hasSearchResults = role === "assistant" && searchResults && searchResults.total > 0;
+
+    // In textOnly mode, always render as text bubble (no search results cards)
+    // Show indicator that results are in the side panel
+    if (textOnly && hasSearchResults) {
+      return (
+        <div
+          className={`${styles.message} ${styles.assistant}`}
+        >
+          <div className={styles.bubble}>
+            <span className={styles.content}>
+              {content || (searchResults.type === "movie" ? "🎬 映画の検索結果があります →" : "🍽️ グルメの検索結果があります →")}
+            </span>
+          </div>
+          <div className={styles.timestamp}>{formatTime(timestamp)}</div>
+        </div>
+      );
+    }
 
     return (
       <div
@@ -78,120 +97,21 @@ const MessageItem = memo(
           role === "user" ? styles.user : styles.assistant
         }`}
       >
-        {hasSearchResults ? (
-          // Render all search results as MovieCards
-          <div className={styles.searchResultsWrapper}>
-            {content && (
-              <div className={styles.assistantComment}>
-                <span className={styles.commentIcon}>💬</span>
-                <span>{content}</span>
-              </div>
-            )}
-            
-            <div className={styles.resultsHeader}>
-              <h3 className={styles.resultsTitle}>
-                {searchResults.type === "movie" ? "🎬 検索結果" : "🍽️ 検索結果"}
-              </h3>
-              <span className={styles.resultsCount}>{searchResults.total}件</span>
-            </div>
-            
-            <div className={styles.resultsGrid}>
-              {searchResults.type === "movie" && searchResults.movies?.map((movie) => {
-                const itemId = movie.id?.toString() || `movie-${Date.now()}-${Math.random()}`;
-                const itemIsSaved = isSavedFn(itemId, "movie");
-                const itemFriendsMatched = itemIsSaved ? getFriendsMatchedFn(itemId, "movie") : [];
-                
-                const movieArchiveItem: ArchiveItemInfo = {
-                  itemId,
-                  itemTitle: movie.title_ja,
-                  itemDomain: "movie",
-                  itemData: {
-                    title_en: movie.title_en,
-                    description: movie.description,
-                    release_year: movie.release_year,
-                    rating: movie.rating,
-                    director: movie.director,
-                    actors: movie.actors,
-                  },
-                };
-                
-                return (
-                  <MovieCard
-                    key={itemId}
-                    archiveItem={movieArchiveItem}
-                    isSaved={itemIsSaved}
-                    onSave={() => {
-                      if (userId && onSaveToArchive && !itemIsSaved) {
-                        onSaveToArchive(userId, "movie", itemId, movie.title_ja, movieArchiveItem.itemData);
-                      }
-                    }}
-                    friendsMatched={itemFriendsMatched}
-                  />
-                );
-              })}
-              
-              {searchResults.type === "gourmet" && searchResults.restaurants?.map((restaurant) => {
-                const itemId = restaurant.id?.toString() || `gourmet-${Date.now()}-${Math.random()}`;
-                const itemIsSaved = isSavedFn(itemId, "gourmet");
-                const itemFriendsMatched = itemIsSaved ? getFriendsMatchedFn(itemId, "gourmet") : [];
-                
-                const gourmetArchiveItem: ArchiveItemInfo = {
-                  itemId,
-                  itemTitle: restaurant.name,
-                  itemDomain: "gourmet",
-                  itemData: {
-                    code: restaurant.code,
-                    name_short: restaurant.name_short,
-                    address: restaurant.address,
-                    catch_copy: restaurant.catch_copy,
-                    urls_pc: restaurant.urls_pc,
-                    open_hours: restaurant.open_hours,
-                    close_days: restaurant.close_days,
-                    access: restaurant.access,
-                    capacity: restaurant.capacity,
-                    lat: restaurant.lat,
-                    lng: restaurant.lng,
-                    budget_id: restaurant.budget_id,
-                  },
-                };
-                
-                return (
-                  <GourmetCard
-                    key={itemId}
-                    archiveItem={gourmetArchiveItem}
-                    isSaved={itemIsSaved}
-                    onSave={() => {
-                      if (userId && onSaveToArchive && !itemIsSaved) {
-                        onSaveToArchive(userId, "gourmet", itemId, restaurant.name, gourmetArchiveItem.itemData);
-                      }
-                    }}
-                    friendsMatched={itemFriendsMatched}
-                  />
-                );
-              })}
-            </div>
-            
-            <div className={styles.timestamp}>{formatTime(timestamp)}</div>
-          </div>
-        ) : (
-          // Regular text bubble for non-search messages
-          <>
-            <div className={styles.bubble}>
-              <span className={styles.content}>{content}</span>
-              {(canSave || isSaved) && (
-                <button
-                  className={styles.saveButton}
-                  onClick={onSave}
-                  title={isSaved ? "保存済み" : "アーカイブに保存"}
-                  disabled={isSaved}
-                >
-                  {isSaved ? "✓" : "📚"}
-                </button>
-              )}
-            </div>
-            <div className={styles.timestamp}>{formatTime(timestamp)}</div>
-          </>
-        )}
+        {/* Regular text bubble */}
+        <div className={styles.bubble}>
+          <span className={styles.content}>{content}</span>
+          {(canSave || isSaved) && (
+            <button
+              className={styles.saveButton}
+              onClick={onSave}
+              title={isSaved ? "保存済み" : "アーカイブに保存"}
+              disabled={isSaved}
+            >
+              {isSaved ? "✓" : "📚"}
+            </button>
+          )}
+        </div>
+        <div className={styles.timestamp}>{formatTime(timestamp)}</div>
       </div>
     );
   },
@@ -215,6 +135,7 @@ const MessageItem = memo(
       prev.isSaved === next.isSaved &&
       prev.canSave === next.canSave &&
       prev.role === next.role &&
+      prev.textOnly === next.textOnly &&
       prev.archiveItem?.itemId === next.archiveItem?.itemId &&
       !friendsChanged &&  // Re-render if friends changed
       !searchResultsChanged &&  // Re-render if search results changed
@@ -227,7 +148,7 @@ const MessageItem = memo(
 // Empty handler for messages without archive capability
 const noopHandler = () => {};
 
-export function ChatHistory({ messages, userId, onSaveToArchive }: ChatHistoryProps) {
+export function ChatHistory({ messages, userId, onSaveToArchive, textOnly = false }: ChatHistoryProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   // Cache handlers by itemId to maintain referential stability
   const handlerCacheRef = useRef<Map<string, () => void>>(new Map());
@@ -382,6 +303,7 @@ export function ChatHistory({ messages, userId, onSaveToArchive }: ChatHistoryPr
             isSavedFn={isSaved}
             getFriendsMatchedFn={getFriendsMatched}
             archiveVersion={archiveVersion}
+            textOnly={textOnly}
           />
         );
       })}

@@ -5,7 +5,7 @@ import { useWebSocket } from "@/hooks/useWebSocket";
 import { useAudioPlayer } from "@/hooks/useAudioPlayer";
 import { useAWSTranscribe } from "@/hooks/useAWSTranscribe";
 import { useWaitingPhrase } from "@/hooks/useWaitingPhrase";
-import { RabbitAvatar, ChatHistory, ChatInput, WorkflowTimingDisplay } from "@/components";
+import { RabbitAvatar, ChatHistory, ChatInput, WorkflowTimingDisplay, SearchResultsPanel } from "@/components";
 import { createLogger } from "@/utils/logger";
 import { unlockAudio, preloadWaitingSounds, setupVisibilityHandler } from "@/utils/audioUnlock";
 import { shouldPlayWaitingPhrase } from "@/utils/keywordDetection";
@@ -411,6 +411,7 @@ export default function Home() {
       </header>
 
       <main className={styles.main}>
+        {/* Left: Avatar & Status */}
         <aside className={styles.avatarSection}>
           <RabbitAvatar
             emotion={emotion}
@@ -436,11 +437,13 @@ export default function Home() {
           <WorkflowTimingDisplay timing={workflowTiming} />
         </aside>
 
+        {/* Center: Chat (text only) */}
         <section className={styles.chatSection}>
           <ChatHistory
             messages={messages}
             userId={userId}
             onSaveToArchive={handleSaveToArchive}
+            textOnly={true}
           />
           <ChatInput
             onSendMessage={sendMessage}
@@ -454,6 +457,15 @@ export default function Home() {
             transcribeError={transcribe.error}
           />
         </section>
+
+        {/* Right: Search Results Panel (components only) */}
+        <aside className={styles.resultsSection}>
+          <SearchResultsPanel
+            messages={messages}
+            userId={userId}
+            onSaveToArchive={handleSaveToArchive}
+          />
+        </aside>
       </main>
     </div>
   );

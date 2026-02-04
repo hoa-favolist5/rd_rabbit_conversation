@@ -4,10 +4,10 @@
  * Key design: Buffers RAW audio at source sample rate, then resamples
  * the entire batch in one shot. This avoids:
  *   1. Frame-boundary artifacts from per-frame resampling
- *   2. Excessive postMessage calls (375/s → ~31/s)
+ *   2. Excessive postMessage calls (375/s → ~10/s)
  *   3. Stale buffer references (inputData is copied immediately)
  *
- * Output: ~32ms chunks of 16kHz PCM16 audio (512 samples = 1024 bytes)
+ * Output: 100ms chunks of 16kHz PCM16 audio (1600 samples = 3200 bytes)
  */
 
 class AudioCaptureProcessor extends AudioWorkletProcessor {
@@ -16,10 +16,10 @@ class AudioCaptureProcessor extends AudioWorkletProcessor {
     this.targetSampleRate = 16000; // AWS Transcribe requires 16kHz
 
     // Target output size in samples at the TARGET rate (16kHz).
-    // 1024 samples @ 16kHz = 64ms — better speech context for recognition
-    // while still maintaining reasonable latency (~15 chunks/s).
+    // 1600 samples @ 16kHz = 100ms — optimal for Japanese speech recognition
+    // Provides more phoneme context while maintaining ~10 chunks/s latency.
     // Larger chunks give AWS Transcribe more context for Japanese phonemes.
-    this.TARGET_OUTPUT_SAMPLES = 1024;
+    this.TARGET_OUTPUT_SAMPLES = 1600;
 
     // Pre-allocated ring buffer for raw audio at SOURCE sample rate.
     // Sized for up to 4:1 ratio (e.g. 64kHz→16kHz) plus extra frames for safety.

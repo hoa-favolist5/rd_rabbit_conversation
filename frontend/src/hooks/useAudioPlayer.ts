@@ -327,11 +327,6 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     processNextChunkRef.current = processNextChunk;
   }, [processNextChunk]);
 
-  // Keep processNextChunk ref updated
-  useEffect(() => {
-    processNextChunkRef.current = processNextChunk;
-  }, [processNextChunk]);
-
   // Cleanup on unmount
   useEffect(() => {
     return () => {

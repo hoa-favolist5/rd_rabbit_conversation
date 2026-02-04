@@ -7,7 +7,7 @@
  * Usage: npm run generate:short-waiting
  */
 
-import { synthesizeSpeech } from "../services/google-tts.js";
+import { synthesizeSpeech } from "../services/gemini-tts.js";
 import { writeFile, mkdir } from "fs/promises";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";

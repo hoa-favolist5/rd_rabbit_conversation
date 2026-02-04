@@ -1,7 +1,7 @@
 import { WebSocket } from "ws";
 import { v4 as uuidv4 } from "uuid";
 import { chat, needsMovieSearch, needsGourmetSearch, needsSearch } from "../services/claude.js";
-import { synthesizeSpeechBase64 } from "../services/google-tts.js";
+import { synthesizeSpeechBase64 } from "../services/gemini-tts.js";
 import { searchMovies } from "../db/movies.js";
 import { searchGourmetRestaurants } from "../db/gourmet.js";
 import { combinedMovieSearch } from "../services/combined-search.js";
@@ -13,27 +13,63 @@ import { detectDomain } from "../utils/domain-detector.js";
 import { getRandomUser, userProfileToContext, type UserContext } from "../db/user-profile.js";
 
 const log = createLogger("WS");
+
+// Import types from shared package for new message formats
 import type {
   ConversationTurn,
   ConversationStatus,
   EmotionType,
-  StatusMessage,
-  UserMessage,
-  AssistantMessage,
-  ErrorMessage,
-  WSMessage,
-  LongWaitingMessage,
   DomainType,
-  SetUserInfoMessage,
-  SaveArchiveMessage,
-  LoadHistoryMessage,
-  HistoryLoadedMessage,
-  RequestGreetingMessage,
   ArchiveItemInfo,
+  SearchResults,
   Movie,
   GourmetRestaurant,
+  WSBaseMessage,
+  // New message types
+  ResponseMessage,
+  StatusMessage as NewStatusMessage,
+  AudioMessage as NewAudioMessage,
+  ErrorMessage as NewErrorMessage,
+  VoiceEventMessage,
+  // Legacy types for backward compatibility
+  WSMessage,
+  LoadHistoryMessage,
+  HistoryLoadedMessage,
+  // Helper functions
+  createResponseMessage,
+  createStatusMessage,
+  createAudioMessage,
+  createErrorMessage,
 } from "../types/index.js";
 import { saveToArchive, getFriendsWhoSavedItem } from "../db/user-archive.js";
+
+// Legacy type aliases for backward compatibility
+type LegacyStatusMessage = {
+  type: "status";
+  status: ConversationStatus;
+  emotion: EmotionType;
+  statusText: string;
+};
+type LegacyUserMessage = { type: "user_message"; text: string };
+type LegacyAssistantMessage = {
+  type: "assistant_message";
+  text: string;
+  emotion: EmotionType;
+  messageId?: string;
+  domain?: DomainType;
+  archiveItem?: ArchiveItemInfo;
+  searchResults?: SearchResults;
+};
+type LegacyErrorMessage = { type: "error"; message: string };
+type LegacyLongWaitingMessage = {
+  type: "long_waiting";
+  audio: string;
+  text: string;
+  responseId?: string;
+};
+type SetUserInfoMessage = { type: "set_user_info"; userId?: string; userName?: string; userToken?: string };
+type SaveArchiveMessage = { type: "save_archive"; userId: string; domain: DomainType; itemId: string; itemTitle?: string; itemData?: Record<string, unknown> };
+type RequestGreetingMessage = { type: "request_greeting" };
 
 // Configuration for parallel TTS streaming (TEN Framework inspired)
 const ENABLE_PARALLEL_TTS = true;
@@ -209,7 +245,7 @@ const STEP_LABELS: Record<WorkflowStep, { name: string; nameJa: string }> = {
   STEP5_DB_SEARCH: { name: "DB Search", nameJa: "データベース検索" },
   STEP6_LLM_RESPONSE: { name: "LLM Response", nameJa: "Claude最終レスポンス" },
   STEP7_TEXT_RESPONSE: { name: "Text Response", nameJa: "テキスト応答送信" },
-  STEP8_TTS_SYNTHESIS: { name: "TTS Synthesis", nameJa: "Azure TTS音声合成" },
+  STEP8_TTS_SYNTHESIS: { name: "TTS Synthesis", nameJa: "TTS音声合成" },
   STEP9_AUDIO_SEND: { name: "Audio Send", nameJa: "音声データ送信" },
   STEP10_AUDIO_PLAY: { name: "Audio Play", nameJa: "音声再生" },
   STEP11_TIMING_SEND: { name: "Timing Send", nameJa: "タイミング情報送信" },
@@ -330,7 +366,7 @@ class WorkflowTimer {
 /**
  * Send a message to the WebSocket client
  */
-function send(ws: WebSocket, message: WSMessage): void {
+function send(ws: WebSocket, message: WSMessage | WSBaseMessage): void {
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(message));
   }
@@ -338,6 +374,7 @@ function send(ws: WebSocket, message: WSMessage): void {
 
 /**
  * Send status update to client
+ * Sends both legacy and new format for backward compatibility
  */
 function sendStatus(
   ws: WebSocket,
@@ -345,20 +382,25 @@ function sendStatus(
   emotion: EmotionType,
   statusText: string
 ): void {
-  const message: StatusMessage = {
+  // Legacy format (for existing frontend)
+  const legacyMessage: LegacyStatusMessage = {
     type: "status",
     status,
     emotion,
     statusText,
   };
-  send(ws, message);
+  send(ws, legacyMessage);
+  
+  // New format will be enabled in future when frontend is ready
+  // const newMessage = createStatusMessage(emotion, status, statusText);
+  // send(ws, newMessage);
 }
 
 /**
  * Send user message echo to client
  */
 function sendUserMessage(ws: WebSocket, text: string): void {
-  const message: UserMessage = {
+  const message: LegacyUserMessage = {
     type: "user_message",
     text,
   };
@@ -367,6 +409,7 @@ function sendUserMessage(ws: WebSocket, text: string): void {
 
 /**
  * Send assistant message to client
+ * Sends both legacy and new format for backward compatibility
  */
 function sendAssistantMessage(
   ws: WebSocket,
@@ -375,9 +418,10 @@ function sendAssistantMessage(
   messageId?: string,
   domain?: DomainType,
   archiveItem?: ArchiveItemInfo,
-  searchResults?: import("../types/index.js").SearchResults
+  searchResults?: SearchResults
 ): void {
-  const message: AssistantMessage = {
+  // Legacy format (for existing frontend)
+  const legacyMessage: LegacyAssistantMessage = {
     type: "assistant_message",
     text,
     emotion,
@@ -386,33 +430,69 @@ function sendAssistantMessage(
     ...(archiveItem ? { archiveItem } : {}),
     ...(searchResults ? { searchResults } : {}),
   };
-  send(ws, message);
+  send(ws, legacyMessage);
+  
+  // New format will be enabled in future when frontend is ready
+  // Build component data if search results exist
+  // let component: ResponseMessage["component"] = undefined;
+  // if (searchResults) {
+  //   if (searchResults.type === "movie" && searchResults.movies) {
+  //     component = {
+  //       type: "movie_list",
+  //       data: { movies: searchResults.movies, total: searchResults.total },
+  //     };
+  //   } else if (searchResults.type === "gourmet" && searchResults.restaurants) {
+  //     component = {
+  //       type: "gourmet_list",
+  //       data: { restaurants: searchResults.restaurants, total: searchResults.total },
+  //     };
+  //   }
+  // }
+  // const newMessage = createResponseMessage(emotion, "speaking", text, messageId || "", false, {
+  //   component,
+  //   context: domain ? { domain } : undefined,
+  //   extra: archiveItem ? { archiveItem } : undefined,
+  // });
+  // send(ws, newMessage);
 }
 
 /**
  * Send assistant streaming delta
+ * Sends both legacy and new format for backward compatibility
  */
 function sendAssistantDelta(ws: WebSocket, text: string, messageId: string): void {
+  // Legacy format
   send(ws, {
     type: "assistant_delta",
     text,
     messageId,
   });
+  
+  // New format will be enabled in future when frontend is ready
+  // const newMessage = createResponseMessage("thinking", "thinking", text, messageId, true);
+  // send(ws, newMessage);
 }
 
 /**
  * Send error message to client
+ * Sends both legacy and new format for backward compatibility
  */
 function sendError(ws: WebSocket, errorMessage: string): void {
-  const message: ErrorMessage = {
+  // Legacy format
+  const legacyMessage: LegacyErrorMessage = {
     type: "error",
     message: errorMessage,
   };
-  send(ws, message);
+  send(ws, legacyMessage);
+  
+  // New format will be enabled in future when frontend is ready
+  // const newMessage = createErrorMessage("UNKNOWN_ERROR", errorMessage, true);
+  // send(ws, newMessage);
 }
 
 /**
  * Send long waiting audio (for database operations)
+ * Sends both legacy and new format for backward compatibility
  */
 async function sendLongWaiting(
   ws: WebSocket,
@@ -431,18 +511,27 @@ async function sendLongWaiting(
       voice: "female",
     });
     
-    // Send to client with responseId
-    const message: LongWaitingMessage = {
+    // Legacy format (for existing frontend)
+    const legacyMessage: LegacyLongWaitingMessage = {
       type: "long_waiting",
       audio,
       text,
-      responseId,  // Add responseId for tracking
+      responseId,
     };
-    send(ws, message);
+    send(ws, legacyMessage);
+    
+    // New format will be enabled in future when frontend is ready
+    // const newMessage = createAudioMessage(audio, "mp3", {
+    //   isProtected: true,  // Cannot be interrupted
+    //   text,
+    //   responseId,
+    // });
+    // send(ws, newMessage);
   } catch (error) {
     log.error("Failed to generate long waiting audio:", error);
   }
 }
+
 
 /**
  * Send transcript message to client (real-time STT)
@@ -1278,6 +1367,177 @@ async function handleMessage(session: Session, data: string): Promise<void> {
 
       case "ping": {
         send(session.ws, { type: "pong" });
+        break;
+      }
+
+      // ================================================================
+      // New unified message type (voice_event)
+      // Supports the improved communication pattern
+      // ================================================================
+      case "voice_event": {
+        const voiceEvent = message as unknown as VoiceEventMessage;
+        const eventName = voiceEvent.event?.name;
+        
+        session.log.debug(`Received voice_event: ${eventName}`);
+        
+        switch (eventName) {
+          case "text_input": {
+            const text = voiceEvent.text;
+            if (text && text.trim()) {
+              const trimmedText = text.trim();
+              
+              // Validate message length
+              if (trimmedText.length > MAX_MESSAGE_LENGTH) {
+                session.log.warn(`Message too long: ${trimmedText.length} chars`);
+                sendError(session.ws, `メッセージが長すぎます（最大${MAX_MESSAGE_LENGTH}文字）`);
+                return;
+              }
+              
+              // Check rate limit
+              if (!checkRateLimit(session)) {
+                session.log.warn("Rate limit exceeded");
+                sendError(session.ws, "リクエストが多すぎます。少し待ってからお試しください。");
+                return;
+              }
+              
+              await processUserInput(session, trimmedText);
+            }
+            break;
+          }
+          
+          case "set_user_info": {
+            // Get random user from database
+            session.log.info(`🎲 Fetching random user...`);
+            const userProfile = await getRandomUser();
+            
+            if (userProfile) {
+              const context = userProfileToContext(userProfile);
+              session.userId = context.userId.toString();
+              session.userName = context.nickName;
+              session.userContext = context;
+              
+              session.log = createUserLogger("WS", session.userId);
+              setUserId(session.userId);
+              
+              session.log.info(`✅ Random user selected: ${context.nickName} (ID: ${context.userId})`);
+              
+              send(session.ws, { 
+                type: "user_info_set", 
+                success: true,
+                user: context
+              });
+            } else {
+              session.log.warn(`❌ No users found in database`);
+              send(session.ws, { 
+                type: "user_info_set", 
+                success: false,
+                error: "No users available"
+              });
+            }
+            break;
+          }
+          
+          case "load_history": {
+            const userId = voiceEvent.context?.userId || voiceEvent.params?.userId as string;
+            const limit = (voiceEvent.params?.limit as number) || 5;
+            
+            if (!userId) {
+              session.log.warn("Invalid load_history: missing userId");
+              sendError(session.ws, "ユーザーIDが必要です");
+              return;
+            }
+            
+            try {
+              session.log.info(`📜 Loading ${limit} recent history items for user ${userId}`);
+              const records = await getConversationHistoryByUserId(userId, undefined, limit);
+              const history = recordsToTurns(records.reverse());
+              
+              session.log.info(`✅ Loaded ${history.length} history items`);
+              
+              const historyMsg: HistoryLoadedMessage = {
+                type: "history_loaded",
+                history,
+              };
+              send(session.ws, historyMsg);
+            } catch (error) {
+              session.log.error("Failed to load history:", error);
+              sendError(session.ws, "履歴の読み込みに失敗しました");
+            }
+            break;
+          }
+          
+          case "save_archive": {
+            const userId = voiceEvent.context?.userId || voiceEvent.params?.userId as string;
+            const domain = voiceEvent.params?.domain as DomainType;
+            const itemId = voiceEvent.params?.itemId as string;
+            const itemTitle = voiceEvent.params?.itemTitle as string | undefined;
+            const itemData = voiceEvent.params?.itemData as Record<string, unknown> | undefined;
+            
+            if (!userId || !domain || !itemId) {
+              session.log.warn("Invalid save_archive: missing required fields");
+              sendError(session.ws, "保存に必要な情報が不足しています");
+              return;
+            }
+            
+            try {
+              await saveToArchive(userId, domain, itemId, itemTitle, itemData);
+              const friendsMatched = await getFriendsWhoSavedItem(userId, domain, itemId);
+              
+              session.log.info(`📚 Saved to archive: ${domain}/${itemId} for user ${userId}`);
+              
+              send(session.ws, {
+                type: "archive_saved",
+                success: true,
+                message: "アーカイブに保存しました",
+                itemId,
+                domain,
+                friends_matched: friendsMatched,
+              });
+            } catch (error) {
+              session.log.error("Failed to save to archive:", error);
+              sendError(session.ws, "アーカイブへの保存に失敗しました");
+            }
+            break;
+          }
+          
+          case "request_greeting": {
+            session.log.info("👋 Greeting requested (voice_event)");
+            
+            let greeting = "こんにちは！";
+            if (session.userContext?.nickName) {
+              greeting = `やっほー、${session.userContext.nickName}！元気？`;
+            }
+            
+            sendAssistantMessage(session.ws, greeting, "happy");
+            const greetingTurn: ConversationTurn = { 
+              role: "assistant", 
+              content: greeting,
+              domain: "general",
+              emotion: "happy"
+            };
+            session.history.push(greetingTurn);
+            
+            saveConversationTurn(
+              session.id, 
+              greetingTurn, 
+              "general", 
+              session.userId, 
+              session.userName, 
+              session.userToken
+            ).catch(err => {
+              session.log.error("Failed to save greeting to database:", err);
+            });
+            break;
+          }
+          
+          case "ping": {
+            send(session.ws, { type: "pong" });
+            break;
+          }
+          
+          default:
+            session.log.warn(`Unknown voice_event name: ${eventName}`);
+        }
         break;
       }
 

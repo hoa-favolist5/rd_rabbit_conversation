@@ -56,6 +56,8 @@ export interface TranscribeConfig {
   sampleRate: number;
   // Use STS tokens from backend (default: true, recommended for production)
   useSTS?: boolean;
+  // Custom vocabulary name for domain-specific recognition (movie & gourmet)
+  vocabularyName?: string;
   // Legacy mode only (not recommended) - credentials for direct AWS access
   region?: string;
   credentials?: {
@@ -326,15 +328,18 @@ export function useAWSTranscribe({
       }
 
       // Start transcription stream
-      // Japanese STT optimization: Use medium stability for faster + more accurate results
-      // High stability can over-correct and miss conversational Japanese
+      // Japanese STT optimization: Use high stability for more accurate final results
+      // Trade-off: slightly higher latency but better recognition accuracy
       const command = new StartStreamTranscriptionCommand({
         LanguageCode: languageCode as any,
         MediaEncoding: "pcm",
         MediaSampleRateHertz: config.sampleRate,
         AudioStream: audioStream.current,
         EnablePartialResultsStabilization: true,
-        PartialResultsStability: "medium", // medium is better for conversational Japanese
+        PartialResultsStability: "high", // high stability for better Japanese accuracy
+        // Custom vocabulary for movie & gourmet domain (improves recognition of domain terms)
+        VocabularyName: config.vocabularyName,
+        // Note: LanguageModelName is only for custom CLMs and not available for ja-JP streaming
         // Optimize for Japanese conversation
         VocabularyFilterMethod: undefined, // Disable vocabulary filtering for better Japanese accuracy
         ShowSpeakerLabel: false,
@@ -342,10 +347,43 @@ export function useAWSTranscribe({
         // For mono audio (1 channel), omit this parameter entirely
       });
 
-      log.debug("🎙️ AWS Transcribe stream starting...");
-      const response = await transcribeClient.current.send(command);
+      // Retry logic for transient failures (network issues, throttling)
+      const MAX_RETRIES = 3;
+      const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-      if (!response.TranscriptResultStream) {
+      let response;
+      let lastError: Error | null = null;
+
+      for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+        try {
+          if (attempt > 0) {
+            log.debug(`🔄 Retry attempt ${attempt + 1}/${MAX_RETRIES}...`);
+          }
+          log.debug("🎙️ AWS Transcribe stream starting...");
+          response = await transcribeClient.current.send(command);
+          break; // Success, exit retry loop
+        } catch (retryErr) {
+          lastError = retryErr instanceof Error ? retryErr : new Error(String(retryErr));
+          const isRetryable =
+            lastError.message.includes("throttl") ||
+            lastError.message.includes("rate") ||
+            lastError.message.includes("network") ||
+            lastError.message.includes("timeout") ||
+            lastError.message.includes("ECONNRESET") ||
+            lastError.message.includes("socket");
+
+          if (!isRetryable || attempt === MAX_RETRIES - 1) {
+            throw lastError;
+          }
+
+          // Exponential backoff: 100ms, 300ms, 900ms
+          const backoffMs = 100 * Math.pow(3, attempt);
+          log.warn(`⚠️ Transcribe connection failed, retrying in ${backoffMs}ms...`, lastError.message);
+          await delay(backoffMs);
+        }
+      }
+
+      if (!response?.TranscriptResultStream) {
         throw new Error("No transcript stream returned");
       }
 
