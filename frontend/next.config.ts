@@ -13,6 +13,25 @@ const nextConfig: NextConfig = {
       fullUrl: false,
     },
   },
+
+  // Custom headers for Brotli dictionary files (kuroshiro-browser)
+  async headers() {
+    return [
+      {
+        source: "/dict/:path*",
+        headers: [
+          {
+            key: "Content-Type",
+            value: "application/octet-stream",
+          },
+          {
+            key: "Cache-Control",
+            value: "public, max-age=31536000, immutable",
+          },
+        ],
+      },
+    ];
+  },
 };
 
 export default nextConfig;

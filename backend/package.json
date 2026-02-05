@@ -21,9 +21,12 @@
     "@aws-sdk/client-bedrock-runtime": "^3.978.0",
     "@aws-sdk/client-sts": "^3.980.0",
     "@google-cloud/text-to-speech": "^6.4.0",
+    "@rabbit/shared": "file:../shared",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.21.1",
+    "kuroshiro": "^1.2.0",
+    "kuroshiro-analyzer-kuromoji": "^1.1.0",
     "pg": "^8.13.1",
     "uuid": "^10.0.0",
     "ws": "^8.18.0"

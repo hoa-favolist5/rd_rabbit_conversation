@@ -2,8 +2,8 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Rabbit Favolist5",
-  description: "AI Live Conversation Avatar - ラビットAIアシスタント",
+  title: "Lovvit Archive",
+  description: "Lovvit Archive - ラビットAIアシスタント",
   manifest: "/manifest.json",
   appleWebApp: {
     capable: true,

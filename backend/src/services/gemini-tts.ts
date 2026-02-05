@@ -52,21 +52,34 @@ function getClient(): TextToSpeechClient {
 
 // Gemini-TTS voice options for Japanese
 const GEMINI_VOICES = {
-  female: 'Kore',      // Female voice
+  female: 'Achernar',      // Female voice
   male: 'Charon',      // Male voice
 } as const;
 
 // Emotion to natural language prompt mapping
+// Keep prompts subtle - only slight pitch variation, avoid dramatic emotional changes
+// const EMOTION_PROMPTS: Record<EmotionType, string> = {
+//   neutral: 'Say the following in a calm and natural conversational tone',
+//   happy: 'Say the following naturally with a slightly higher pitch',
+//   excited: 'Say the following naturally with a slightly higher pitch and pace',
+//   thinking: 'Say the following naturally with a slightly slower pace',
+//   sad: 'Say the following naturally with a slightly lower pitch',
+//   surprised: 'Say the following naturally with a slightly higher pitch',
+//   confused: 'Say the following naturally with a slightly slower pace',
+//   listening: 'Say the following in a natural conversational tone',
+//   speaking: 'Say the following in a natural conversational tone',
+// };
+
 const EMOTION_PROMPTS: Record<EmotionType, string> = {
-  neutral: 'Say the following in a calm and natural way',
-  happy: 'Say the following in a cheerful and upbeat way, with a smile in your voice',
-  excited: 'Say the following with excitement and energy, showing enthusiasm',
-  thinking: 'Say the following thoughtfully, as if carefully considering each word',
-  sad: 'Say the following in a somber and melancholic tone, with a touch of sadness',
-  surprised: 'Say the following with surprise and wonder, showing amazement',
-  confused: 'Say the following in a confused manner, as if uncertain or puzzled',
-  listening: 'Say the following in an attentive and engaged way, showing you\'re listening',
-  speaking: 'Say the following in a conversational and natural speaking tone',
+  neutral: '',
+  happy: '',
+  excited: '',
+  thinking: '',
+  sad: '',
+  surprised: '',
+  confused: '',
+  listening: '',
+  speaking: '',
 };
 
 /**
@@ -108,7 +121,23 @@ export async function synthesizeSpeech(
 
   try {
     const client = getClient();
+    const startTime = performance.now();
+    const textPreview = text.length > 30 ? text.slice(0, 30) + '...' : text;
+    
+    log.debug(`TTS request START: "${textPreview}" (${text.length} chars, emotion: ${validEmotion})`);
+    
     const [response] = await client.synthesizeSpeech(request);
+    
+    const durationMs = Math.round(performance.now() - startTime);
+    const audioBytes = response.audioContent ? (response.audioContent as Uint8Array).length : 0;
+    const audioKB = Math.round(audioBytes / 1024);
+    
+    // Log with timing details - flag slow requests (>500ms)
+    if (durationMs > 500) {
+      log.warn(`TTS request SLOW: ${durationMs}ms for "${textPreview}" (${text.length} chars → ${audioKB}KB)`);
+    } else {
+      log.debug(`TTS request END: ${durationMs}ms for "${textPreview}" (${text.length} chars → ${audioKB}KB)`);
+    }
 
     if (!response.audioContent) {
       throw new Error('No audio content in response');

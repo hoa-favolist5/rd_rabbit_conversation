@@ -488,6 +488,11 @@ function sendError(ws: WebSocket, errorMessage: string): void {
   // New format will be enabled in future when frontend is ready
   // const newMessage = createErrorMessage("UNKNOWN_ERROR", errorMessage, true);
   // send(ws, newMessage);
+  send(ws, legacyMessage);
+  
+  // New format will be enabled in future when frontend is ready
+  // const newMessage = createErrorMessage("UNKNOWN_ERROR", errorMessage, true);
+  // send(ws, newMessage);
 }
 
 /**
@@ -531,7 +536,6 @@ async function sendLongWaiting(
     log.error("Failed to generate long waiting audio:", error);
   }
 }
-
 
 /**
  * Send transcript message to client (real-time STT)

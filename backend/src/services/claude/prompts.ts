@@ -181,40 +181,13 @@ export const GENERAL_DOMAIN_PROMPT = `
 // SCENARIO DETECTION
 // ============================================================================
 
-// Keywords for scenario detection
+// Import keywords from central location (single source of truth)
+import { MOVIE_KEYWORDS, GOURMET_KEYWORDS } from "../../constants/keywords.js";
+
+// Re-export as SCENARIO_KEYWORDS for backward compatibility
 export const SCENARIO_KEYWORDS = {
-  movie: [
-    // Explicit movie-related
-    "映画", "ムービー", "アニメ", "ドラマ", "シリーズ", "作品", "番組",
-    "監督", "俳優", "女優", "声優", "キャスト", "主演",
-    // Genres
-    "ホラー", "コメディ", "アクション", "ロマンス", "恋愛", "サスペンス", "ミステリー",
-    "ファンタジー", "アドベンチャー", "冒険", "ドキュメンタリー", "スリラー",
-    // Studios/Directors
-    "ジブリ", "ピクサー", "ディズニー", "マーベル", "ワーナー", "ネットフリックス",
-    "宮崎", "新海", "細田", "庵野", "北野", "是枝", "黒澤",
-    // Famous works
-    "千と千尋", "君の名は", "トトロ", "もののけ", "ワンピース", "鬼滅", "進撃",
-    "スターウォーズ", "ハリーポッター", "アベンジャーズ", "ターミネーター",
-    // Actions
-    "見たい", "観たい", "見た", "観た", "おすすめ", "面白い", "評価", "レビュー",
-  ],
-  gourmet: [
-    // Explicit food/restaurant-related
-    "レストラン", "飲食店", "お店", "店", "グルメ", "食事", "ランチ", "ディナー",
-    "料理", "食べ物", "メニュー", "予約", "美味しい", "おいしい", "うまい",
-    // Cuisine types
-    "和食", "洋食", "中華", "イタリアン", "フレンチ", "焼肉", "寿司", "ラーメン",
-    "カレー", "パスタ", "ピザ", "ハンバーガー", "カフェ", "居酒屋", "バー",
-    // Food items
-    "肉", "魚", "野菜", "デザート", "スイーツ", "ケーキ", "パン", "麺",
-    // Restaurant features
-    "個室", "カウンター", "テラス", "夜景", "雰囲気", "安い", "高級", "予算",
-    // Actions
-    "食べたい", "飲みたい", "行きたい", "探してる", "おすすめ", "美味しい店",
-    // Areas (common)
-    "新宿", "渋谷", "銀座", "六本木", "表参道", "恵比寿", "池袋", "品川",
-  ],
+  movie: MOVIE_KEYWORDS,
+  gourmet: GOURMET_KEYWORDS,
 };
 
 /**

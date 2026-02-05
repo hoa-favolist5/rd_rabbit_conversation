@@ -1,57 +1,54 @@
 /**
- * Keyword detection utility for determining if user message requires database operations
- * (movie search, gourmet search, etc.)
+ * Keyword detection for movie/gourmet queries.
  * 
- * If keywords are detected, waiting phrases should be played.
- * If no keywords (traditional conversation), skip waiting phrases.
+ * Determines if user message requires:
+ * 1. Database operations (movie/restaurant search)
+ * 2. Waiting phrase playback
+ * 3. Hiragana conversion for better matching
  */
 
-// Movie-related keywords (synced with backend MOVIE_KEYWORDS)
+// Core keywords that trigger DB operations
+// Kept minimal - backend has full list with hiragana variants
 const MOVIE_KEYWORDS = [
-  // 明示的な映画関連
-  "映画", "ムービー", "アニメ", "ドラマ", "シリーズ", "作品", "番組",
-  "監督", "俳優", "女優", "声優", "キャスト", "主演",
-  // ジャンル
-  "ホラー", "コメディ", "アクション", "ロマンス", "恋愛", "サスペンス", "ミステリー",
-  "ファンタジー", "アドベンチャー", "冒険", "ドキュメンタリー", "スリラー",
-  // スタジオ・監督名
-  "ジブリ", "ピクサー", "ディズニー", "マーベル", "ワーナー", "ネットフリックス",
-  "宮崎", "新海", "細田", "庵野", "北野", "是枝", "黒澤",
-  // 有名作品
-  "千と千尋", "君の名は", "トトロ", "もののけ", "ワンピース", "鬼滅", "進撃",
-  "スターウォーズ", "ハリーポッター", "アベンジャーズ",
-  // アクション動詞
-  "見たい", "観たい", "見た", "観た", "知ってる", "聞いたことある",
-  "おすすめ", "面白い", "評価", "レビュー", "感想",
-  // 質問パターン
-  "何", "どんな", "どう", "教えて", "ある"
+  // Core terms
+  "映画", "アニメ", "ドラマ", "ムービー", "作品",
+  // People
+  "監督", "俳優", "女優", "声優",
+  // Genres
+  "ホラー", "コメディ", "アクション", "ロマンス", "ファンタジー", "ミステリー",
+  // Studios
+  "ジブリ", "ピクサー", "ディズニー", "マーベル",
+  // Famous works
+  "千と千尋", "君の名は", "トトロ", "鬼滅", "ワンピース",
+  // Actions
+  "見たい", "観たい", "おすすめ",
 ];
 
-// Gourmet-related keywords (add as needed)
 const GOURMET_KEYWORDS = [
-  "レストラン", "飲食店", "食事", "ランチ", "ディナー", "カフェ",
-  "居酒屋", "焼肉", "寿司", "ラーメン", "イタリアン", "フレンチ",
-  "中華", "和食", "洋食", "料理", "グルメ", "美味しい", "食べたい",
-  "予約", "お店", "店", "メニュー", "おすすめ", "人気"
+  // Core terms
+  "レストラン", "カフェ", "居酒屋", "料理", "グルメ",
+  // Meals
+  "ランチ", "ディナー", "食事",
+  // Types
+  "寿司", "ラーメン", "焼肉", "イタリアン", "フレンチ", "中華", "和食",
+  // Actions
+  "食べたい", "美味しい", "予約", "おすすめ",
 ];
+
+const ALL_KEYWORDS = [...MOVIE_KEYWORDS, ...GOURMET_KEYWORDS];
 
 /**
- * Check if text contains movie or gourmet keywords
- * @param text User message text
- * @returns true if keywords detected (should play waiting phrase), false otherwise
+ * Check if text contains keywords that trigger DB operations.
+ * Used to decide whether to:
+ * - Play waiting phrase
+ * - Convert to hiragana before sending to backend
  */
 export function shouldPlayWaitingPhrase(text: string): boolean {
-  const normalizedText = text.toLowerCase();
-  
-  // Check movie keywords
-  const hasMovieKeyword = MOVIE_KEYWORDS.some(keyword => 
-    normalizedText.includes(keyword.toLowerCase())
-  );
-  
-  // Check gourmet keywords
-  const hasGourmetKeyword = GOURMET_KEYWORDS.some(keyword =>
-    normalizedText.includes(keyword.toLowerCase())
-  );
-  
-  return hasMovieKeyword || hasGourmetKeyword;
+  const lower = text.toLowerCase();
+  return ALL_KEYWORDS.some((kw) => lower.includes(kw.toLowerCase()));
 }
+
+/**
+ * Alias for clarity in different contexts
+ */
+export const hasDbKeywords = shouldPlayWaitingPhrase;

@@ -61,6 +61,9 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     }
   }, []);
 
+  // Buffer for chunks that arrive before chunk 0 (out-of-order) - declared early for cancelAllAudio
+  const pendingChunksRef = useRef<Map<string, AudioChunk[]>>(new Map());
+
   // Stop all audio and reject future audio until new response starts
   const cancelAllAudio = useCallback(() => {
     log.debug("CANCEL ALL: Stopping audio and rejecting future audio");
@@ -79,6 +82,9 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     // Clear protected audio state
     isProtectedAudioRef.current = false;
     protectedAudioQueueRef.current = [];
+    
+    // Clear pending chunks buffer
+    pendingChunksRef.current.clear();
 
     // Reject all audio until new response with valid responseId
     acceptedResponseIdRef.current = "__CANCELLED__";
@@ -193,6 +199,10 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     [stopSource]
   );
 
+  // Track chunk playback timing
+  const chunkPlayStartRef = useRef<number>(0);
+  const lastChunkEndRef = useRef<number>(0);
+
   // Process next chunk in queue
   const processNextChunk = useCallback(async () => {
     if (!isPlayingQueueRef.current) return;
@@ -201,39 +211,78 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
 
     const nextIndex = currentChunkIndexRef.current;
     const audioData = audioQueueRef.current.get(nextIndex);
+    const now = performance.now();
 
     if (!audioData) {
       if (nextIndex >= totalChunksRef.current && totalChunksRef.current > 0) {
         // All chunks played
+        const totalPlayTime = Math.round(now - firstChunkTimeRef.current);
+        log.debug(`✅ All ${totalChunksRef.current} chunks played (total: ${totalPlayTime}ms)`);
         isPlayingQueueRef.current = false;
         audioQueueRef.current.clear();
         currentChunkIndexRef.current = 0;
         totalChunksRef.current = 0;
+        chunkArrivalTimesRef.current.clear();
         setIsPlaying(false);
+      } else {
+        // Waiting for chunk - log gap
+        const waitingSince = lastChunkEndRef.current > 0 ? Math.round(now - lastChunkEndRef.current) : 0;
+        log.warn(`⏳ Waiting for chunk ${nextIndex}/${totalChunksRef.current} (gap: ${waitingSince}ms)`);
       }
       isProcessingChunkRef.current = false;
       return;
     }
+
+    // Calculate gap between chunks
+    const gap = lastChunkEndRef.current > 0 ? Math.round(now - lastChunkEndRef.current) : 0;
+    if (gap > 50 && nextIndex > 0) {
+      log.warn(`⚠️ Gap before chunk ${nextIndex}: ${gap}ms (not smooth)`);
+    }
+    
+    chunkPlayStartRef.current = now;
+    log.debug(`▶️ Playing chunk ${nextIndex}/${totalChunksRef.current}`);
 
     try {
       const { source } = await playAudioFromBase64(audioData, "mp3");
       sourceRef.current = source;
 
       source.onended = () => {
+        const playDuration = Math.round(performance.now() - chunkPlayStartRef.current);
+        lastChunkEndRef.current = performance.now();
+        log.debug(`⏹️ Chunk ${nextIndex} ended (played: ${playDuration}ms)`);
+        
         isProcessingChunkRef.current = false;
         currentChunkIndexRef.current++;
         processNextChunk();
       };
     } catch (error) {
       log.error(`Audio chunk ${nextIndex} failed:`, error);
+      lastChunkEndRef.current = performance.now();
       isProcessingChunkRef.current = false;
       currentChunkIndexRef.current++;
       processNextChunk();
     }
   }, []);
 
+  // Track chunk arrival times for timing analysis
+  const chunkArrivalTimesRef = useRef<Map<number, number>>(new Map());
+  const firstChunkTimeRef = useRef<number>(0);
+
   // Play audio chunk (for parallel TTS streaming)
   const playChunk = useCallback((chunk: AudioChunk) => {
+    const now = performance.now();
+    
+    // Track timing for first chunk
+    if (chunk.index === 0) {
+      firstChunkTimeRef.current = now;
+      chunkArrivalTimesRef.current.clear();
+    }
+    
+    // Log chunk arrival timing
+    const sinceFirst = chunk.index === 0 ? 0 : Math.round(now - firstChunkTimeRef.current);
+    chunkArrivalTimesRef.current.set(chunk.index, now);
+    log.debug(`📥 Chunk ${chunk.index}/${chunk.total} arrived (+${sinceFirst}ms since chunk 0)`);
+    
     // Check if we should accept this chunk
     if (acceptedResponseIdRef.current === "__CANCELLED__") {
       if (!chunk.responseId) {
@@ -241,7 +290,12 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
         return;
       }
       if (chunk.index !== 0) {
-        log.debug(`Rejecting chunk ${chunk.index} - cancelled, waiting for chunk 0`);
+        // Buffer this chunk - it arrived before chunk 0
+        // We'll process it when chunk 0 arrives
+        const pending = pendingChunksRef.current.get(chunk.responseId) || [];
+        pending.push(chunk);
+        pendingChunksRef.current.set(chunk.responseId, pending);
+        log.debug(`Buffering chunk ${chunk.index} - waiting for chunk 0 (responseId: ${chunk.responseId.slice(-8)})`);
         return;
       }
       // Chunk 0 with responseId - new response starting
@@ -282,6 +336,20 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
       audioQueueRef.current.clear();
       audioQueueRef.current.set(0, chunk.data);
       totalChunksRef.current = chunk.total;
+      
+      // Check for any chunks that arrived before chunk 0 and add them to queue
+      if (chunk.responseId) {
+        const pendingForThis = pendingChunksRef.current.get(chunk.responseId);
+        if (pendingForThis && pendingForThis.length > 0) {
+          log.debug(`Processing ${pendingForThis.length} buffered chunks for response ${chunk.responseId.slice(-8)}`);
+          for (const pendingChunk of pendingForThis) {
+            audioQueueRef.current.set(pendingChunk.index, pendingChunk.data);
+            log.debug(`Added buffered chunk ${pendingChunk.index} to queue`);
+          }
+          pendingChunksRef.current.delete(chunk.responseId);
+        }
+      }
+      
       isPlayingQueueRef.current = true;
       isProcessingChunkRef.current = false;
       currentChunkIndexRef.current = 0;

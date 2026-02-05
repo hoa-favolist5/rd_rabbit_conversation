@@ -8,7 +8,7 @@ import styles from "./ChatInput.module.css";
 const log = createLogger("ChatInput");
 
 interface ChatInputProps {
-  onSendMessage: (text: string) => void;
+  onSendMessage: (text: string) => void | Promise<void>;
   status: ConversationStatus;
   disabled?: boolean;
   // AWS Transcribe voice input props

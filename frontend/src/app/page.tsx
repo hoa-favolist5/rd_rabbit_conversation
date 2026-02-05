@@ -12,6 +12,7 @@ import { shouldPlayWaitingPhrase } from "@/utils/keywordDetection";
 import { detectCommand, isCommandOnly } from "@/utils/voiceCommands";
 import { executeCommand, type CommandContext } from "@/utils/commandExecutor";
 import archiveStorage from "@/utils/archiveStorage";
+import { toHiragana, preloadConverter } from "@/utils/hiraganaConverter";
 import type { ConversationStatus, DomainType, ArchiveItemInfo } from "@/types";
 import styles from "./page.module.css";
 
@@ -64,6 +65,18 @@ export default function Home() {
         // Service worker registration failed — non-critical
       });
     }
+  }, []);
+
+  // Pre-load Kuroshiro converter for hiragana normalization
+  // This loads the kuromoji dictionary (~17MB) in the background
+  useEffect(() => {
+    preloadConverter().then((success) => {
+      if (success) {
+        log.info("✅ Hiragana converter pre-loaded");
+      } else {
+        log.warn("⚠️ Hiragana converter failed to pre-load");
+      }
+    });
   }, []);
 
   const audioPlayer = useAudioPlayer();
@@ -285,7 +298,9 @@ export default function Home() {
   }, [saveToArchive]);
 
   // Send message - cancel all audio and send to backend
-  const sendMessage = useCallback((text: string) => {
+  // Only convert to hiragana when movie/gourmet keywords detected (for better search matching)
+  // Normal conversation keeps original text for better Claude response quality
+  const sendMessage = useCallback(async (text: string) => {
     log.debug(`📤 Sending message: "${text}"`);
 
     // CRITICAL: Cancel all audio - stops current playback and rejects old audio
@@ -326,14 +341,28 @@ export default function Home() {
 
     // No command or command wants to send to backend
     // Check if message contains movie/gourmet keywords
-    const shouldPlayWaiting = shouldPlayWaitingPhrase(text);
-    log.debug(`🔍 Keyword detection: ${shouldPlayWaiting ? "movie/gourmet detected" : "traditional conversation"}`);
+    const hasDbKeywords = shouldPlayWaitingPhrase(text);
+    log.debug(`🔍 Keyword detection: ${hasDbKeywords ? "movie/gourmet detected" : "traditional conversation"}`);
 
     // Start waiting timer only if keywords detected (will play short waiting sound if backend takes > 1s)
-    waitingPhrase.startWaitingTimer(shouldPlayWaiting);
+    waitingPhrase.startWaitingTimer(hasDbKeywords);
 
-    // Send message to backend
-    wsSendMessage(text);
+    // Only convert to hiragana if movie/gourmet keywords detected
+    // This helps backend match movie/restaurant names regardless of how STT outputs them
+    // Normal conversation keeps original text for better Claude response quality
+    if (hasDbKeywords) {
+      try {
+        const hiraganaText = await toHiragana(text);
+        log.debug(`📝 Hiragana conversion: "${text}" → "${hiraganaText}"`);
+        wsSendMessage(hiraganaText);
+      } catch (error) {
+        log.warn("⚠️ Hiragana conversion failed, sending original text:", error);
+        wsSendMessage(text);
+      }
+    } else {
+      // Normal conversation - send original text
+      wsSendMessage(text);
+    }
   }, [wsSendMessage, audioPlayer, waitingPhrase, userId, handleSaveToArchive]);
 
   // AWS Transcribe for voice input
@@ -373,9 +402,11 @@ export default function Home() {
           audioPlayer.cancelAllAudio();
         }
 
-        // Send to sendMessage - it will handle command detection
+        // Send to sendMessage - it will handle command detection and hiragana conversion
         log.debug(`✅ Submitting: "${trimmedText}"`);
-        sendMessage(trimmedText);
+        sendMessage(trimmedText).catch((err) => {
+          log.error("Failed to send message:", err);
+        });
       }
     }, [audioPlayer, wsStatus, sendMessage]),
     onError: useCallback((err: Error) => {
@@ -406,7 +437,7 @@ export default function Home() {
   return (
     <div className={styles.container}>
       <header className={styles.header}>
-        <h1 className={styles.title}>Rabbit Favolist5</h1>
+        <h1 className={styles.title}>Lovvit Archive</h1>
         <p className={styles.subtitle}>日本語会話AIアシスタント</p>
       </header>
 
