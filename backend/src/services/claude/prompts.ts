@@ -7,7 +7,7 @@
  * - General: For casual everyday conversations
  */
 
-import type { ConversationTurn } from "../../types/index.js";
+import type { ConversationTurn, ActiveResultSet, Movie, GourmetRestaurant } from "../../types/index.js";
 
 export type Scenario = 'movie' | 'gourmet' | 'general';
 
@@ -86,7 +86,7 @@ export const MOVIE_DOMAIN_PROMPT = `
 【ツール使用】
 - 知らない作品名・固有名詞→search_movies使う
 - ユーザーが「それ」「もっと詳しく」「他に」等の質問→search_movies使う
-- 検索結果→最も関連性高い1つだけ紹介
+- 検索結果→番号付きで紹介（複数の場合）
 - 確認フレーズ不要→すぐに結果を答える
 - 作品名検索は元の表記のまま（"Terminator"なら"Terminator"で検索、翻訳しない）
 - queryには作品名のみ（"Terminator movie"→"Terminator"、"映画"等の一般語は除外）
@@ -99,7 +99,7 @@ export const MOVIE_DOMAIN_PROMPT = `
 
 良い回答例：
 [EMOTION:happy] 映画の話しよう！何が見たい？
-[EMOTION:excited] それなら『君の名は』がいいよ！感動系だよ
+[EMOTION:excited] 3つ見つけたよ！1番は『君の名は。』感動系、2番は『天気の子』ファンタジー、3番は『すずめの戸締まり』冒険作！気になるのある？
 [EMOTION:excited] 『ターミネーター』は1984年のSF映画だよ！アーノルドが主演してるんだ`;
 
 // Gourmet/Restaurant scenario
@@ -126,11 +126,12 @@ export const GOURMET_DOMAIN_PROMPT = `
 ❌ 悪い：「ランチなら1000円から2000円くらいで、ディナーは3000円から5000円くらいで...」
 ✅ 良い：「ランチなら1500円くらいだよ！」
 
+
 【ツール使用】
 - レストラン・料理の質問→gourmet_search使う
 - ユーザーが「それ」「もっと詳しく」「他に」等の質問→gourmet_search使う
 - エリア・ジャンル・予算で絞り込む
-- 検索結果→最も条件に合う1つだけ紹介
+- 検索結果→番号付きで紹介（複数の場合）
 - 確認フレーズ不要→すぐに結果を答える
 - 店名検索は元の表記のまま（"SAPURA"なら"SAPURA"で検索、翻訳しない）
 - queryには店名のみ（"CUOCA restaurant"→"CUOCA"、"レストラン"等の一般語は除外）
@@ -144,7 +145,7 @@ export const GOURMET_DOMAIN_PROMPT = `
 
 良い回答例：
 [EMOTION:happy] 美味しいもの食べたいの？どんな料理がいい？
-[EMOTION:excited] それなら『鳥貴族』がいいよ！焼き鳥が美味しくて安いんだ
+[EMOTION:excited] 3つ見つけたよ！1番は『鳥貴族』焼き鳥、2番は『サイゼリヤ』イタリアン、3番は『ラ・ベットラ』本格パスタ！どこがいい？
 [EMOTION:thinking] 新宿でイタリアンなら『ラ・ベットラ』がおすすめだよ！`;
 
 // General conversation scenario
@@ -279,7 +280,47 @@ function buildUserContextPrompt(userContext?: any): string {
   return parts.join('\n');
 }
 
-export function buildSystemPrompt(scenario: Scenario, userContext?: any): string {
+/**
+ * Build active result context for the system prompt
+ * This tells the LLM what search results are currently displayed
+ * and which item (if any) the user is focused on
+ */
+export function buildActiveResultContext(activeResults?: ActiveResultSet | null): string {
+  if (!activeResults || activeResults.items.length === 0) {
+    return '';
+  }
+
+  const { items, selectedIndex, type } = activeResults;
+
+  // Check if results have expired (10 minutes)
+  if (Date.now() - activeResults.timestamp > 10 * 60 * 1000) {
+    return '';
+  }
+
+  let context = '\n\n【現在の検索結果】\n';
+  context += `件数: ${items.length}件 (${type === 'movie' ? '映画' : 'グルメ'})\n`;
+
+  items.forEach((item, i) => {
+    const name = type === 'movie'
+      ? (item as Movie).title_ja
+      : (item as GourmetRestaurant).name;
+    const marker = i === selectedIndex ? '→ ' : '  ';
+    context += `${marker}${i + 1}番: ${name}\n`;
+  });
+
+  if (selectedIndex !== null && selectedIndex >= 0 && selectedIndex < items.length) {
+    const selected = items[selectedIndex];
+    const name = type === 'movie'
+      ? (selected as Movie).title_ja
+      : (selected as GourmetRestaurant).name;
+    context += `\nユーザーが注目中: ${name}\n`;
+    context += '「それ」「もっと」等はこの項目について答えること。\n';
+  }
+
+  return context;
+}
+
+export function buildSystemPrompt(scenario: Scenario, userContext?: any, activeResults?: ActiveResultSet | null): string {
   let domainPrompt: string;
   
   switch (scenario) {
@@ -296,5 +337,6 @@ export function buildSystemPrompt(scenario: Scenario, userContext?: any): string
   }
   
   const userContextPrompt = buildUserContextPrompt(userContext);
-  return BASE_PROMPT + domainPrompt + userContextPrompt;
+  const activeResultContext = buildActiveResultContext(activeResults);
+  return BASE_PROMPT + domainPrompt + userContextPrompt + activeResultContext;
 }

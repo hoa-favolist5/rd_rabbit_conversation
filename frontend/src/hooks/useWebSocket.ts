@@ -69,6 +69,7 @@ interface UseWebSocketOptions {
   onWaiting?: (index: number) => void;  // Play waiting audio before DB search
   onTranscript?: (text: string, isFinal: boolean) => void;  // Real-time transcription
   onBackendResponse?: () => void;  // Called when any backend response arrives (text or audio)
+  onItemFocused?: (index: number, itemId: string, domain: DomainType, itemTitle: string) => void;  // Item selected via voice
 }
 
 interface UseWebSocketReturn {
@@ -92,6 +93,8 @@ interface UseWebSocketReturn {
   saveToArchive: (userId: string, domain: DomainType, itemId: string, itemTitle?: string, itemData?: Record<string, unknown>) => void;
   // New method using unified message format
   sendVoiceEvent: (event: VoiceEventMessage) => void;
+  // Send item selection (card tap or voice number)
+  sendSelectItem: (index: number, itemId: string, action: "focus" | "detail" | "save") => void;
 }
 
 export function useWebSocket({
@@ -101,6 +104,7 @@ export function useWebSocket({
   onWaiting,
   onTranscript,
   onBackendResponse,
+  onItemFocused,
 }: UseWebSocketOptions): UseWebSocketReturn {
   const [isConnected, setIsConnected] = useState(false);
   const [status, setStatus] = useState<ConversationStatus>("idle");
@@ -457,6 +461,17 @@ export function useWebSocket({
           break;
         }
 
+        case "item_focused": {
+          // Backend tells us an item was selected (via voice number)
+          const focusedIndex = message.index as number;
+          const focusedItemId = message.itemId as string;
+          const focusedDomain = message.domain as DomainType;
+          const focusedTitle = message.itemTitle as string;
+          log.debug(`🔢 Item focused: ${focusedIndex + 1}番 "${focusedTitle}" (${focusedDomain})`);
+          onItemFocused?.(focusedIndex, focusedItemId, focusedDomain, focusedTitle);
+          break;
+        }
+
         case "pong":
           // Heartbeat response
           break;
@@ -618,7 +633,7 @@ export function useWebSocket({
           log.debug("Unknown message type:", message.type);
       }
     },
-    [generateId, onAudio, onAudioChunk, onWaiting, onTranscript, onBackendResponse]
+    [generateId, onAudio, onAudioChunk, onWaiting, onTranscript, onBackendResponse, onItemFocused]
   );
 
   // Send message to server
@@ -750,6 +765,25 @@ export function useWebSocket({
     }
   }, []);
 
+  // Send item selection (card tap or programmatic selection)
+  const sendSelectItem = useCallback((
+    index: number,
+    itemId: string,
+    action: "focus" | "detail" | "save"
+  ) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      log.debug(`👆 Sending select_item: index=${index}, itemId=${itemId}, action=${action}`);
+      wsRef.current.send(JSON.stringify({
+        type: "select_item",
+        index,
+        itemId,
+        action,
+      }));
+    } else {
+      log.warn("⚠️ Cannot send select_item: WebSocket not connected");
+    }
+  }, []);
+
   // Connect on mount
   useEffect(() => {
     connect();
@@ -815,5 +849,6 @@ export function useWebSocket({
     requestGreeting,
     saveToArchive,
     sendVoiceEvent,
+    sendSelectItem,
   };
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { memo, useMemo } from "react";
+import React, { memo, useMemo, useCallback, useRef, useEffect } from "react";
 import type { ChatMessage, DomainType, ArchiveItemInfo, FriendMatch, SearchResults as SearchResultsType } from "@/types";
 import { MovieCard } from "./MovieCard";
 import { GourmetCard } from "./GourmetCard";
@@ -11,6 +11,10 @@ interface SearchResultsPanelProps {
   messages: ChatMessage[];
   userId: string | null;
   onSaveToArchive?: (userId: string, domain: DomainType, itemId: string, itemTitle?: string, itemData?: Record<string, unknown>) => void;
+  /** Currently selected/focused card index (0-based), from voice or touch */
+  selectedIndex?: number | null;
+  /** Callback when user taps a card */
+  onCardSelect?: (index: number, itemId: string, action: "focus" | "detail" | "save") => void;
 }
 
 /**
@@ -23,9 +27,14 @@ export const SearchResultsPanel = memo(function SearchResultsPanel({
   messages,
   userId,
   onSaveToArchive,
+  selectedIndex = null,
+  onCardSelect,
 }: SearchResultsPanelProps) {
   // Get archive state
   const { items: archiveItems, isSaved, getFriendsMatched } = useArchiveStorage();
+  
+  // Refs for scrolling selected card into view
+  const cardRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   
   // Find the latest message with search results
   const latestSearchResult = useMemo(() => {
@@ -42,6 +51,23 @@ export const SearchResultsPanel = memo(function SearchResultsPanel({
   const archiveVersion = useMemo(() => {
     return archiveItems.length + archiveItems.filter(item => item.savedAt).length;
   }, [archiveItems]);
+
+  // Auto-scroll selected card into view
+  useEffect(() => {
+    if (selectedIndex !== null && selectedIndex !== undefined) {
+      const cardEl = cardRefs.current.get(selectedIndex);
+      if (cardEl) {
+        cardEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      }
+    }
+  }, [selectedIndex]);
+
+  // Handle card click
+  const handleCardClick = useCallback((index: number, itemId: string) => {
+    if (onCardSelect) {
+      onCardSelect(index, itemId, "focus");
+    }
+  }, [onCardSelect]);
 
   if (!latestSearchResult || !latestSearchResult.searchResults) {
     return (
@@ -77,10 +103,11 @@ export const SearchResultsPanel = memo(function SearchResultsPanel({
       
       {/* Results grid */}
       <div className={styles.resultsGrid}>
-        {searchResults.type === "movie" && searchResults.movies?.map((movie) => {
+        {searchResults.type === "movie" && searchResults.movies?.map((movie, index) => {
           const itemId = movie.id?.toString() || `movie-${Date.now()}-${Math.random()}`;
           const itemIsSaved = isSaved(itemId, "movie");
           const itemFriendsMatched = itemIsSaved ? getFriendsMatched(itemId, "movie") : [];
+          const isSelected = selectedIndex === index;
           
           const movieArchiveItem: ArchiveItemInfo = {
             itemId,
@@ -89,6 +116,8 @@ export const SearchResultsPanel = memo(function SearchResultsPanel({
             itemData: {
               title_en: movie.title_en,
               description: movie.description,
+              overview: movie.overview,
+              poster_path: movie.poster_path,
               release_year: movie.release_year,
               rating: movie.rating,
               director: movie.director,
@@ -97,24 +126,40 @@ export const SearchResultsPanel = memo(function SearchResultsPanel({
           };
           
           return (
-            <MovieCard
+            <div
               key={itemId}
-              archiveItem={movieArchiveItem}
-              isSaved={itemIsSaved}
-              onSave={() => {
-                if (userId && onSaveToArchive && !itemIsSaved) {
-                  onSaveToArchive(userId, "movie", itemId, movie.title_ja, movieArchiveItem.itemData);
-                }
-              }}
-              friendsMatched={itemFriendsMatched}
-            />
+              ref={(el) => { if (el) cardRefs.current.set(index, el); }}
+              className={`${styles.cardWrapper} ${isSelected ? styles.cardSelected : ''}`}
+              onClick={() => handleCardClick(index, itemId)}
+              role="button"
+              tabIndex={0}
+              aria-label={`${index + 1}番目の検索結果: ${movie.title_ja}`}
+              aria-selected={isSelected}
+            >
+              {/* Number badge */}
+              <div className={styles.numberBadge} aria-hidden="true">
+                <span>{index + 1}</span>
+              </div>
+              <MovieCard
+                archiveItem={movieArchiveItem}
+                isSaved={itemIsSaved}
+                onSave={() => {
+                  if (userId && onSaveToArchive && !itemIsSaved) {
+                    onSaveToArchive(userId, "movie", itemId, movie.title_ja, movieArchiveItem.itemData);
+                  }
+                }}
+                onDetail={() => onCardSelect?.(index, itemId, "detail")}
+                friendsMatched={itemFriendsMatched}
+              />
+            </div>
           );
         })}
         
-        {searchResults.type === "gourmet" && searchResults.restaurants?.map((restaurant) => {
+        {searchResults.type === "gourmet" && searchResults.restaurants?.map((restaurant, index) => {
           const itemId = restaurant.id?.toString() || `gourmet-${Date.now()}-${Math.random()}`;
           const itemIsSaved = isSaved(itemId, "gourmet");
           const itemFriendsMatched = itemIsSaved ? getFriendsMatched(itemId, "gourmet") : [];
+          const isSelected = selectedIndex === index;
           
           const gourmetArchiveItem: ArchiveItemInfo = {
             itemId,
@@ -137,17 +182,32 @@ export const SearchResultsPanel = memo(function SearchResultsPanel({
           };
           
           return (
-            <GourmetCard
+            <div
               key={itemId}
-              archiveItem={gourmetArchiveItem}
-              isSaved={itemIsSaved}
-              onSave={() => {
-                if (userId && onSaveToArchive && !itemIsSaved) {
-                  onSaveToArchive(userId, "gourmet", itemId, restaurant.name, gourmetArchiveItem.itemData);
-                }
-              }}
-              friendsMatched={itemFriendsMatched}
-            />
+              ref={(el) => { if (el) cardRefs.current.set(index, el); }}
+              className={`${styles.cardWrapper} ${isSelected ? styles.cardSelected : ''}`}
+              onClick={() => handleCardClick(index, itemId)}
+              role="button"
+              tabIndex={0}
+              aria-label={`${index + 1}番目の検索結果: ${restaurant.name}`}
+              aria-selected={isSelected}
+            >
+              {/* Number badge */}
+              <div className={styles.numberBadge} aria-hidden="true">
+                <span>{index + 1}</span>
+              </div>
+              <GourmetCard
+                archiveItem={gourmetArchiveItem}
+                isSaved={itemIsSaved}
+                onSave={() => {
+                  if (userId && onSaveToArchive && !itemIsSaved) {
+                    onSaveToArchive(userId, "gourmet", itemId, restaurant.name, gourmetArchiveItem.itemData);
+                  }
+                }}
+                onDetail={() => onCardSelect?.(index, itemId, "detail")}
+                friendsMatched={itemFriendsMatched}
+              />
+            </div>
           );
         })}
       </div>

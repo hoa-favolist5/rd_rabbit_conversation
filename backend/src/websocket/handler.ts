@@ -25,6 +25,9 @@ import type {
   Movie,
   GourmetRestaurant,
   WSBaseMessage,
+  ActiveResultSet,
+  SelectItemMessage,
+  ItemFocusedMessage,
   // New message types
   ResponseMessage,
   StatusMessage as NewStatusMessage,
@@ -70,6 +73,36 @@ type LegacyLongWaitingMessage = {
 type SetUserInfoMessage = { type: "set_user_info"; userId?: string; userName?: string; userToken?: string };
 type SaveArchiveMessage = { type: "save_archive"; userId: string; domain: DomainType; itemId: string; itemTitle?: string; itemData?: Record<string, unknown> };
 type RequestGreetingMessage = { type: "request_greeting" };
+
+// Legacy type aliases for backward compatibility
+type LegacyStatusMessage = {
+  type: "status";
+  status: ConversationStatus;
+  emotion: EmotionType;
+  statusText: string;
+};
+type LegacyUserMessage = { type: "user_message"; text: string };
+type LegacyAssistantMessage = {
+  type: "assistant_message";
+  text: string;
+  emotion: EmotionType;
+  messageId?: string;
+  domain?: DomainType;
+  archiveItem?: ArchiveItemInfo;
+  searchResults?: SearchResults;
+};
+type LegacyErrorMessage = { type: "error"; message: string };
+type LegacyLongWaitingMessage = {
+  type: "long_waiting";
+  audio: string;
+  text: string;
+  responseId?: string;
+};
+type SetUserInfoMessage = { type: "set_user_info"; userId?: string; userName?: string; userToken?: string };
+type SaveArchiveMessage = { type: "save_archive"; userId: string; domain: DomainType; itemId: string; itemTitle?: string; itemData?: Record<string, unknown> };
+type RequestGreetingMessage = { type: "request_greeting" };
+
+import { saveToArchive, getFriendsWhoSavedItem } from "../db/user-archive.js";
 
 // Configuration for parallel TTS streaming (TEN Framework inspired)
 const ENABLE_PARALLEL_TTS = true;
@@ -148,6 +181,8 @@ interface Session {
   userName?: string;  // User display name (nick_name)
   userToken?: string;  // User authentication token
   userContext?: UserContext;  // Full user context for LLM
+  // Active result set for numbered voice selection
+  activeResults: ActiveResultSet | null;
 }
 
 // Active sessions
@@ -488,11 +523,6 @@ function sendError(ws: WebSocket, errorMessage: string): void {
   // New format will be enabled in future when frontend is ready
   // const newMessage = createErrorMessage("UNKNOWN_ERROR", errorMessage, true);
   // send(ws, newMessage);
-  send(ws, legacyMessage);
-  
-  // New format will be enabled in future when frontend is ready
-  // const newMessage = createErrorMessage("UNKNOWN_ERROR", errorMessage, true);
-  // send(ws, newMessage);
 }
 
 /**
@@ -582,6 +612,92 @@ function sendWorkflowTiming(
   });
 }
 
+// ============================================================================
+// Numbered Selection: Number extraction from user text
+// ============================================================================
+
+const KANJI_TO_NUMBER: Record<string, number> = {
+  '一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
+  '六': 6, '七': 7, '八': 8, '九': 9,
+  '１': 1, '２': 2, '３': 3, '４': 4, '５': 5,
+  '６': 6, '７': 7, '８': 8, '９': 9,
+};
+
+const HIRAGANA_TO_NUMBER: Record<string, number> = {
+  'いち': 1, 'に': 2, 'さん': 3, 'よん': 4, 'ご': 5,
+};
+
+/**
+ * Extract a 1-based selection number from user text
+ * Handles: 1番, 10番, 20番, ２番, 一番, いちばん, 1つ目, 一つ目
+ */
+function extractSelectionNumber(text: string): number | null {
+  const patterns: Array<{ pattern: RegExp; extract: (m: RegExpMatchArray) => number | null }> = [
+    { pattern: /([1-9]\d*)番/, extract: m => parseInt(m[1]) },
+    { pattern: /([１-９])番/, extract: m => KANJI_TO_NUMBER[m[1]] ?? null },
+    { pattern: /([一二三四五六七八九])番/, extract: m => KANJI_TO_NUMBER[m[1]] ?? null },
+    { pattern: /([1-9]\d*)つ目/, extract: m => parseInt(m[1]) },
+    { pattern: /([一二三四五])つ目/, extract: m => KANJI_TO_NUMBER[m[1]] ?? null },
+    { pattern: /(いち|に|さん|よん|ご)ばん/, extract: m => HIRAGANA_TO_NUMBER[m[1]] ?? null },
+  ];
+
+  for (const { pattern, extract } of patterns) {
+    const match = text.match(pattern);
+    if (match) {
+      const num = extract(match);
+      if (num !== null && num >= 1) return num;
+    }
+  }
+  return null;
+}
+
+/**
+ * Get the display name of a search result item
+ */
+function getItemName(item: Movie | GourmetRestaurant, type: "movie" | "gourmet"): string {
+  if (type === "movie") {
+    return (item as Movie).title_ja;
+  }
+  return (item as GourmetRestaurant).name;
+}
+
+/**
+ * Get the item ID for a search result item
+ */
+function getItemId(item: Movie | GourmetRestaurant, type: "movie" | "gourmet"): string {
+  if (type === "movie") {
+    return (item as Movie).id?.toString() || `movie-${Date.now()}`;
+  }
+  return (item as GourmetRestaurant).id?.toString() || `gourmet-${Date.now()}`;
+}
+
+// Active results expiry: 10 minutes
+const ACTIVE_RESULTS_EXPIRY_MS = 10 * 60 * 1000;
+
+/**
+ * Format gourmet search results for LLM
+ */
+function formatGourmetResults(result: import("../types/index.js").GourmetSearchResult): string {
+  if (result.restaurants.length === 0) {
+    return JSON.stringify({ found: 0 });
+  }
+
+  const compact = result.restaurants.slice(0, 5).map(r => ({
+    name: r.name,
+    addr: r.address,
+    copy: r.catch_copy,
+    access: r.access,
+    hours: r.open_hours,
+  }));
+
+  // Log formatted results being sent to LLM
+  const names = result.restaurants.slice(0, 3).map(r => r.name).join(", ");
+  const more = result.restaurants.length > 3 ? ` +${result.restaurants.length - 3} more` : "";
+  createLogger("Gourmet").debug(`📤 Formatted ${result.restaurants.length} results for LLM: ${names}${more}`);
+
+  return JSON.stringify(compact);
+}
+
 /**
  * Format gourmet search results for LLM
  */
@@ -660,6 +776,47 @@ async function processUserInput(session: Session, userText: string): Promise<voi
     sessionLog.debug("Backend processing started");
     workflow.endStep();
 
+    // ================================================================
+    // NUMBERED SELECTION: Check if user is selecting by number
+    // If "2番" is detected and we have active results, resolve the entity
+    // and inject context so the LLM knows which item the user means
+    // ================================================================
+    let enrichedUserText = userText;
+    const selectionNumber = extractSelectionNumber(userText);
+    
+    if (selectionNumber && session.activeResults && session.activeResults.items.length > 0) {
+      // Check if results haven't expired
+      if (Date.now() - session.activeResults.timestamp < ACTIVE_RESULTS_EXPIRY_MS) {
+        const index = selectionNumber - 1;
+        if (index < session.activeResults.items.length) {
+          const selectedItem = session.activeResults.items[index];
+          session.activeResults.selectedIndex = index;
+          
+          const entityName = getItemName(selectedItem, session.activeResults.type);
+          
+          // Inject resolved entity context into the user message for LLM
+          enrichedUserText = `[ユーザーが「${entityName}」を選択] ${userText}`;
+          sessionLog.info(`🔢 Number selection: ${selectionNumber}番 → "${entityName}" (index: ${index})`);
+          
+          // Send item_focused to frontend so the card gets highlighted
+          const focusedMsg: ItemFocusedMessage = {
+            type: "item_focused",
+            index,
+            itemId: getItemId(selectedItem, session.activeResults.type),
+            domain: session.activeResults.type,
+            itemTitle: entityName,
+            action: "highlight",
+          };
+          send(ws, focusedMsg);
+        } else {
+          sessionLog.debug(`🔢 Selection ${selectionNumber} out of range (${session.activeResults.items.length} items)`);
+        }
+      } else {
+        sessionLog.debug("🔢 Active results expired, ignoring number selection");
+        session.activeResults = null;
+      }
+    }
+
     // STEP 4-6: LLM Request and Response
     workflow.startStep("STEP4_LLM_REQUEST");
 
@@ -706,6 +863,16 @@ async function processUserInput(session: Session, userText: string): Promise<voi
               movies: result.dbResults.movies,
               total: result.dbResults.total,
             };
+            
+            // Populate active results for numbered selection
+            session.activeResults = {
+              type: "movie",
+              items: result.dbResults.movies,
+              selectedIndex: null,
+              query: userText,
+              timestamp: Date.now(),
+            };
+            sessionLog.debug(`🔢 Active results set: ${result.dbResults.movies.length} movies`);
           }
           
           return result.merged; // Return formatted string for LLM
@@ -741,6 +908,16 @@ async function processUserInput(session: Session, userText: string): Promise<voi
               restaurants: result.restaurants,
               total: result.total,
             };
+            
+            // Populate active results for numbered selection
+            session.activeResults = {
+              type: "gourmet",
+              items: result.restaurants,
+              selectedIndex: null,
+              query: userText,
+              timestamp: Date.now(),
+            };
+            sessionLog.debug(`🔢 Active results set: ${result.restaurants.length} gourmet restaurants`);
           }
           
           // Format results for LLM
@@ -766,7 +943,7 @@ async function processUserInput(session: Session, userText: string): Promise<voi
 
     const response = await chat(
       history,
-      userText,
+      enrichedUserText,
       async (query, genre, year) => {
         // Skip if response was cancelled (barge-in)
         if (session.currentResponseId !== responseId) {
@@ -799,8 +976,10 @@ async function processUserInput(session: Session, userText: string): Promise<voi
         const searchTiming = searchTimer.stop();
         workflow.recordDbSearch(searchTiming.durationMs);
         
-        // Extract first movie for archive if found and not already set
-        if (!foundArchiveItem && result.dbResults && result.dbResults.movies && result.dbResults.movies.length > 0) {
+        // Extract first movie for archive and update results
+        // Always update when tool_use search completes - it reflects Claude's refined query
+        // and should take precedence over prefetch results
+        if (result.dbResults && result.dbResults.movies && result.dbResults.movies.length > 0) {
           const movie = result.dbResults.movies[0];
           foundArchiveItem = {
             itemId: movie.id?.toString() || `movie-${Date.now()}`,
@@ -816,12 +995,22 @@ async function processUserInput(session: Session, userText: string): Promise<voi
             },
           };
           
-          // Store all search results for frontend
+          // Store all search results for frontend (override prefetch results)
           allSearchResults = {
             type: "movie",
             movies: result.dbResults.movies,
             total: result.dbResults.total,
           };
+          
+          // Populate active results for numbered selection
+          session.activeResults = {
+            type: "movie",
+            items: result.dbResults.movies,
+            selectedIndex: null,
+            query: query,
+            timestamp: Date.now(),
+          };
+          sessionLog.debug(`🔢 Active results updated by tool_use: ${result.dbResults.movies.length} movies (query: "${query}")`);
         }
         
         return result.merged; // Return formatted string for LLM
@@ -900,8 +1089,10 @@ async function processUserInput(session: Session, userText: string): Promise<voi
         const searchTiming = searchTimer.stop();
         workflow.recordDbSearch(searchTiming.durationMs);
         
-        // Extract first restaurant for archive if found and not already set
-        if (!foundArchiveItem && result.restaurants && result.restaurants.length > 0) {
+        // Extract first restaurant for archive and update results
+        // Always update when tool_use search completes - it reflects Claude's refined query
+        // and should take precedence over prefetch results
+        if (result.restaurants && result.restaurants.length > 0) {
           const restaurant = result.restaurants[0];
           foundArchiveItem = {
             itemId: restaurant.id?.toString() || `gourmet-${Date.now()}`,
@@ -916,16 +1107,27 @@ async function processUserInput(session: Session, userText: string): Promise<voi
             },
           };
           
-          // Store all search results for frontend
+          // Store all search results for frontend (override prefetch results)
           allSearchResults = {
             type: "gourmet",
             restaurants: result.restaurants,
             total: result.total,
           };
+          
+          // Populate active results for numbered selection
+          session.activeResults = {
+            type: "gourmet",
+            items: result.restaurants,
+            selectedIndex: null,
+            query: query,
+            timestamp: Date.now(),
+          };
+          sessionLog.debug(`🔢 Active results updated by tool_use: ${result.restaurants.length} restaurants (query: "${query}")`);
         }
         
         return formatGourmetResults(result); // Return formatted string for LLM
-      }
+      },
+      session.activeResults  // Pass active results for numbered selection context
     );
 
     workflow.endStep({
@@ -1369,6 +1571,31 @@ async function handleMessage(session: Session, data: string): Promise<void> {
         break;
       }
 
+      case "select_item": {
+        // Handle card tap / touch selection from frontend
+        const selectMsg = message as unknown as SelectItemMessage;
+        const { index, itemId, action } = selectMsg;
+        
+        session.log.info(`👆 Item selected: index=${index}, itemId=${itemId}, action=${action}`);
+        
+        if (session.activeResults && index >= 0 && index < session.activeResults.items.length) {
+          session.activeResults.selectedIndex = index;
+          const selectedItem = session.activeResults.items[index];
+          const entityName = getItemName(selectedItem, session.activeResults.type);
+          
+          session.log.info(`🔢 Touch selection: ${index + 1}番 → "${entityName}"`);
+          
+          // If action is "detail", trigger an auto-response about the item
+          if (action === "detail") {
+            const detailText = `[ユーザーが「${entityName}」を選択] ${index + 1}番について教えて`;
+            await processUserInput(session, detailText);
+          }
+          // If action is "save", the frontend handles it directly via save_archive
+          // "focus" just updates the selected index (done above)
+        }
+        break;
+      }
+
       case "ping": {
         send(session.ws, { type: "pong" });
         break;
@@ -1581,6 +1808,7 @@ export function handleConnection(ws: WebSocket): void {
     log: sessionLog,  // Add user-specific logger
     currentDomain: "general",  // Initialize with general domain
     userId: initialUserId,  // Initialize with "guest"
+    activeResults: null,  // No active results initially
   };
 
   sessions.set(sessionId, session);

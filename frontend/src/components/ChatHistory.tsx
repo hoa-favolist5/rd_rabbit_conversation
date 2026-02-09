@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useRef, memo, useCallback, useMemo } from "react";
-import type { ChatMessage, EmotionType, DomainType, ArchiveItemInfo, FriendMatch, SearchResults as SearchResultsType } from "@/types";
+import type { ChatMessage, DomainType, SearchResults as SearchResultsType } from "@/types";
 import { useArchiveStorage } from "@/hooks/useArchiveStorage";
 import styles from "./ChatHistory.module.css";
 
@@ -12,19 +12,6 @@ interface ChatHistoryProps {
   /** If true, show only text messages (hide search results) */
   textOnly?: boolean;
 }
-
-// Move constant outside component to avoid recreation on each render
-const EMOJI_MAP: Record<EmotionType, string> = {
-  neutral: "😐",
-  happy: "😊",
-  excited: "🤩",
-  thinking: "🤔",
-  sad: "😢",
-  surprised: "😲",
-  confused: "😕",
-  listening: "👂",
-  speaking: "🗣️",
-};
 
 function formatTime(date: Date): string {
   return date.toLocaleTimeString("ja-JP", {
@@ -42,15 +29,8 @@ interface MessageItemProps {
   isSaved: boolean;
   canSave: boolean;
   onSave: () => void;
-  archiveItem?: ArchiveItemInfo;
-  friendsMatched: FriendMatch[];
   searchResults?: SearchResultsType;
-  userId: string | null;
-  onSaveToArchive?: (userId: string, domain: DomainType, itemId: string, itemTitle?: string, itemData?: Record<string, unknown>) => void;
-  isSavedFn: (itemId: string, domain: DomainType) => boolean;
-  getFriendsMatchedFn: (itemId: string, domain: DomainType) => FriendMatch[];
-  archiveVersion: number; // Version number to force re-renders when archive changes
-  textOnly?: boolean; // If true, render only text (no search results)
+  textOnly?: boolean;
 }
 
 const MessageItem = memo(
@@ -61,21 +41,14 @@ const MessageItem = memo(
     isSaved, 
     canSave, 
     onSave, 
-    archiveItem, 
-    friendsMatched,
     searchResults,
-    userId,
-    onSaveToArchive,
-    isSavedFn,
-    getFriendsMatchedFn,
-    archiveVersion, // Used to detect archive changes
-    textOnly = false, // Default to showing all content
+    textOnly = false,
   }: MessageItemProps) {
     // Check if this is a movie/gourmet message with search results
     const hasSearchResults = role === "assistant" && searchResults && searchResults.total > 0;
 
-    // In textOnly mode, always render as text bubble (no search results cards)
-    // Show indicator that results are in the side panel
+    // In textOnly mode, render as plain text bubble (no item display)
+    // Items are ONLY shown in the SearchResultsPanel which has real database item_ids
     if (textOnly && hasSearchResults) {
       return (
         <div
@@ -115,34 +88,17 @@ const MessageItem = memo(
       </div>
     );
   },
-  // Custom comparison - skip onSave comparison since it's stable per itemId
-  (prev, next) => {
-    // Check if friendsMatched array changed
-    const friendsChanged = prev.friendsMatched.length !== next.friendsMatched.length ||
-      prev.friendsMatched.some((f, i) => f.id !== next.friendsMatched[i]?.id);
-    
-    // Check if search results changed (simplified - just check total and type)
-    const searchResultsChanged = 
-      prev.searchResults?.total !== next.searchResults?.total ||
-      prev.searchResults?.type !== next.searchResults?.type;
-    
-    // Check if archive changed (this will force re-render of all MovieCards)
-    const archiveChanged = prev.archiveVersion !== next.archiveVersion;
-    
-    return (
-      prev.messageId === next.messageId &&
-      prev.content === next.content &&
-      prev.isSaved === next.isSaved &&
-      prev.canSave === next.canSave &&
-      prev.role === next.role &&
-      prev.textOnly === next.textOnly &&
-      prev.archiveItem?.itemId === next.archiveItem?.itemId &&
-      !friendsChanged &&  // Re-render if friends changed
-      !searchResultsChanged &&  // Re-render if search results changed
-      !archiveChanged  // Re-render if archive changed (for multiple MovieCards)
-      // Intentionally skip onSave, timestamp, and function comparisons
-    );
-  }
+  // Custom comparison - only re-render when visible content changes
+  (prev, next) => (
+    prev.messageId === next.messageId &&
+    prev.content === next.content &&
+    prev.isSaved === next.isSaved &&
+    prev.canSave === next.canSave &&
+    prev.role === next.role &&
+    prev.textOnly === next.textOnly &&
+    prev.searchResults?.total === next.searchResults?.total &&
+    prev.searchResults?.type === next.searchResults?.type
+  )
 );
 
 // Empty handler for messages without archive capability
@@ -153,9 +109,8 @@ export function ChatHistory({ messages, userId, onSaveToArchive, textOnly = fals
   // Cache handlers by itemId to maintain referential stability
   const handlerCacheRef = useRef<Map<string, () => void>>(new Map());
 
-  // SINGLE SOURCE OF TRUTH: Use archiveStorage hook for saved state and friends
-  // items array is used as dependency to trigger re-renders when storage changes
-  const { items: archiveItems, isSaved, getFriendsMatched } = useArchiveStorage();
+  // SINGLE SOURCE OF TRUTH: Use archiveStorage hook for saved state
+  const { isSaved } = useArchiveStorage();
 
   // Auto-scroll to bottom on new messages only
   const prevMessagesLengthRef = useRef(messages.length);
@@ -173,7 +128,7 @@ export function ChatHistory({ messages, userId, onSaveToArchive, textOnly = fals
     itemDomain: DomainType,
     itemData: Record<string, unknown> | undefined,
     content: string,
-    emotion: EmotionType | undefined,
+    emotion: string | undefined,
     timestamp: Date
   ): (() => void) => {
     // Return cached handler if exists
@@ -232,13 +187,6 @@ export function ChatHistory({ messages, userId, onSaveToArchive, textOnly = fals
     return unique;
   }, [messages]);
 
-  // Create a version number based on archive items to trigger re-renders
-  // This ensures all MovieCards update when any item is saved
-  // MUST be before early return to maintain hook order
-  const archiveVersion = useMemo(() => {
-    return archiveItems.length + archiveItems.filter(item => item.savedAt).length;
-  }, [archiveItems]);
-
   // Debug: Log if we have duplicates
   useEffect(() => {
     if (uniqueMessages.length !== messages.length) {
@@ -265,7 +213,6 @@ export function ChatHistory({ messages, userId, onSaveToArchive, textOnly = fals
 
         // Get state from archiveStorage (single source of truth)
         const itemIsSaved = itemId && itemDomain ? isSaved(itemId, itemDomain) : false;
-        const friendsMatched = itemId && itemDomain ? getFriendsMatched(itemId, itemDomain) : [];
 
         const canSave = message.role === "assistant" &&
                         !!archiveItem &&
@@ -295,14 +242,7 @@ export function ChatHistory({ messages, userId, onSaveToArchive, textOnly = fals
             isSaved={itemIsSaved}
             canSave={canSave}
             onSave={handleSave}
-            archiveItem={archiveItem}
-            friendsMatched={friendsMatched}
             searchResults={message.searchResults}
-            userId={userId}
-            onSaveToArchive={onSaveToArchive}
-            isSavedFn={isSaved}
-            getFriendsMatchedFn={getFriendsMatched}
-            archiveVersion={archiveVersion}
             textOnly={textOnly}
           />
         );

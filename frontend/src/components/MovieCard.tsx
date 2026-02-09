@@ -8,11 +8,12 @@ interface MovieCardProps {
   archiveItem: ArchiveItemInfo;
   isSaved: boolean;
   onSave: () => void;
+  onDetail?: () => void;
   friendsMatched: FriendMatch[];
 }
 
 export const MovieCard = memo(
-  function MovieCard({ archiveItem, isSaved, onSave, friendsMatched }: MovieCardProps) {
+  function MovieCard({ archiveItem, isSaved, onSave, onDetail, friendsMatched }: MovieCardProps) {
   const { itemTitle, itemData, itemDomain } = archiveItem;
   
   // Determine if this is a movie or gourmet item
@@ -23,6 +24,8 @@ export const MovieCard = memo(
   const titleEn = itemData?.title_en;
   const releaseYear = itemData?.release_year as number | undefined;
   const rating = itemData?.rating as number | undefined;
+  const overview = (itemData?.overview || itemData?.description) as string | undefined;
+  const posterPath = itemData?.poster_path as string | undefined;
   
   // Extract gourmet details
   const address = itemData?.address as string | undefined;
@@ -52,9 +55,18 @@ export const MovieCard = memo(
   return (
     <div className={styles.movieCard}>
       <div className={styles.header}>
-        <div className={styles.posterPlaceholder}>
-          <span className={styles.posterIcon}>{isGourmet ? "🍽️" : "🎬"}</span>
-        </div>
+        {isMovie && posterPath ? (
+          <img
+            className={styles.posterImage}
+            src={posterPath}
+            alt={displayTitle || "Movie poster"}
+            loading="lazy"
+          />
+        ) : (
+          <div className={styles.posterPlaceholder}>
+            <span className={styles.posterIcon}>{isGourmet ? "🍽️" : "🎬"}</span>
+          </div>
+        )}
         <div className={styles.info}>
           <h3 className={styles.title}>{displayTitle}</h3>
           
@@ -85,6 +97,11 @@ export const MovieCard = memo(
             )}
           </div>
           
+          {/* Movie overview */}
+          {isMovie && overview && (
+            <p className={styles.overview}>{overview}</p>
+          )}
+          
           {/* Gourmet additional info */}
           {isGourmet && access && (
             <div className={styles.detail}>
@@ -106,14 +123,25 @@ export const MovieCard = memo(
             </div>
           )}
         </div>
-        <button
-          className={`${styles.saveButton} ${isSaved ? styles.saved : ""}`}
-          onClick={onSave}
-          disabled={isSaved}
-          title={isSaved ? "保存済み" : "アーカイブに保存"}
-        >
-          {isSaved ? "✓" : "📚"}
-        </button>
+        <div className={styles.cardActions}>
+          <button
+            className={`${styles.saveButton} ${isSaved ? styles.saved : ""}`}
+            onClick={(e) => { e.stopPropagation(); onSave(); }}
+            disabled={isSaved}
+            title={isSaved ? "保存済み" : "アーカイブに保存"}
+          >
+            {isSaved ? "✓" : "📚"}
+          </button>
+          {onDetail && (
+            <button
+              className={styles.detailButton}
+              onClick={(e) => { e.stopPropagation(); onDetail(); }}
+              title="詳細を見る"
+            >
+              📋
+            </button>
+          )}
+        </div>
       </div>
       
       {/* Friend appointment buttons */}

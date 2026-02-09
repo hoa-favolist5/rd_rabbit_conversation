@@ -8,11 +8,12 @@ interface GourmetCardProps {
   archiveItem: ArchiveItemInfo;
   isSaved: boolean;
   onSave: () => void;
+  onDetail?: () => void;
   friendsMatched: FriendMatch[];
 }
 
 export const GourmetCard = memo(
-  function GourmetCard({ archiveItem, isSaved, onSave, friendsMatched }: GourmetCardProps) {
+  function GourmetCard({ archiveItem, isSaved, onSave, onDetail, friendsMatched }: GourmetCardProps) {
   const { itemTitle, itemData } = archiveItem;
   
   // Extract gourmet details
@@ -160,14 +161,25 @@ export const GourmetCard = memo(
             </div>
           )}
         </div>
-        <button
-          className={`${styles.saveButton} ${isSaved ? styles.saved : ""}`}
-          onClick={onSave}
-          disabled={isSaved}
-          title={isSaved ? "保存済み" : "アーカイブに保存"}
-        >
-          {isSaved ? "✓" : "📚"}
-        </button>
+        <div className={styles.cardActions}>
+          <button
+            className={`${styles.saveButton} ${isSaved ? styles.saved : ""}`}
+            onClick={(e) => { e.stopPropagation(); onSave(); }}
+            disabled={isSaved}
+            title={isSaved ? "保存済み" : "アーカイブに保存"}
+          >
+            {isSaved ? "✓" : "📚"}
+          </button>
+          {onDetail && (
+            <button
+              className={styles.detailButton}
+              onClick={(e) => { e.stopPropagation(); onDetail(); }}
+              title="詳細を見る"
+            >
+              📋
+            </button>
+          )}
+        </div>
       </div>
       
       {/* Friend appointment buttons */}

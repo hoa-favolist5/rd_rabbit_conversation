@@ -9,11 +9,11 @@ import { RabbitAvatar, ChatHistory, ChatInput, WorkflowTimingDisplay, SearchResu
 import { createLogger } from "@/utils/logger";
 import { unlockAudio, preloadWaitingSounds, setupVisibilityHandler } from "@/utils/audioUnlock";
 import { shouldPlayWaitingPhrase } from "@/utils/keywordDetection";
-import { detectCommand, isCommandOnly } from "@/utils/voiceCommands";
+import { detectCommand } from "@/utils/voiceCommands";
 import { executeCommand, type CommandContext } from "@/utils/commandExecutor";
 import archiveStorage from "@/utils/archiveStorage";
 import { toHiragana, preloadConverter } from "@/utils/hiraganaConverter";
-import type { ConversationStatus, DomainType, ArchiveItemInfo } from "@/types";
+import type { ConversationStatus, DomainType, ArchiveItemInfo, SearchResults } from "@/types";
 import styles from "./page.module.css";
 
 const log = createLogger("Page");
@@ -81,6 +81,9 @@ export default function Home() {
 
   const audioPlayer = useAudioPlayer();
   const [voiceDetected, setVoiceDetected] = useState(false);
+  
+  // Numbered selection state: which card is currently selected/focused
+  const [selectedResultIndex, setSelectedResultIndex] = useState<number | null>(null);
 
   // Track if early barge-in was triggered (reset on final transcript)
   const earlyBargeInTriggeredRef = useRef(false);
@@ -151,6 +154,12 @@ export default function Home() {
     [audioPlayer, waitingPhrase]
   );
 
+  // Handle item focused from backend (voice number selection "2番")
+  const handleItemFocused = useCallback((index: number, itemId: string, domain: DomainType, itemTitle: string) => {
+    log.info(`🔢 Item focused from voice: ${index + 1}番 "${itemTitle}"`);
+    setSelectedResultIndex(index);
+  }, []);
+
   const {
     isConnected,
     status: wsStatus,
@@ -166,6 +175,7 @@ export default function Home() {
     loadHistory,
     requestGreeting,
     saveToArchive,
+    sendSelectItem,
   } = useWebSocket({
     url: WS_URL,
     onAudio: handleAudio,
@@ -174,7 +184,83 @@ export default function Home() {
       // Backend responded - cancel waiting timer if still waiting
       waitingPhrase.cancelWaitingTimer();
     },
+    onItemFocused: handleItemFocused,
   });
+
+  // Save to archive - archiveStorage handles state, ChatHistory uses useArchiveStorage hook
+  const handleSaveToArchive = useCallback((
+    userId: string,
+    domain: DomainType,
+    itemId: string,
+    itemTitle?: string,
+    itemData?: Record<string, unknown>
+  ) => {
+    // Call WebSocket save - backend will respond with archive_saved
+    // useWebSocket will update archiveStorage, which triggers re-render via useArchiveStorage hook
+    saveToArchive(userId, domain, itemId, itemTitle, itemData);
+
+    // Optimistically mark as saved in archiveStorage (immediate UI feedback)
+    // Include itemTitle and itemData so the item can be created if it doesn't exist
+    archiveStorage.updateItem(itemId, domain, { 
+      savedAt: new Date(),
+      itemTitle,
+      itemDomain: domain,
+      itemData,
+    });
+    log.debug(`✅ Optimistic save: ${itemId}`);
+  }, [saveToArchive]);
+
+  // Reset selected index when new search results arrive
+  const latestSearchResultRef = useRef<SearchResults | undefined>(undefined);
+  useEffect(() => {
+    const lastMsg = messages[messages.length - 1];
+    if (lastMsg?.role === "assistant" && lastMsg.searchResults) {
+      if (lastMsg.searchResults !== latestSearchResultRef.current) {
+        latestSearchResultRef.current = lastMsg.searchResults;
+        setSelectedResultIndex(null);
+        log.debug("🔄 New search results arrived, reset selection");
+      }
+    }
+  }, [messages]);
+
+  // Handle card selection from touch (tap on card)
+  const handleCardSelect = useCallback((index: number, itemId: string, action: "focus" | "detail" | "save") => {
+    log.info(`👆 Card selected: ${index + 1}番, action=${action}`);
+    setSelectedResultIndex(index);
+    
+    // Send to backend so LLM knows the selection
+    sendSelectItem(index, itemId, action);
+    
+    // If action is "save", also trigger archive save
+    if (action === "save" && userId) {
+      const lastMsg = messages[messages.length - 1];
+      if (lastMsg?.searchResults) {
+        const { searchResults } = lastMsg;
+        if (searchResults.type === "movie" && searchResults.movies?.[index]) {
+          const movie = searchResults.movies[index];
+          const movieItemId = movie.id?.toString() || itemId;
+          handleSaveToArchive(userId, "movie", movieItemId, movie.title_ja, {
+            title_en: movie.title_en,
+            description: movie.description,
+            release_year: movie.release_year,
+            rating: movie.rating,
+            director: movie.director,
+            actors: movie.actors,
+          });
+        } else if (searchResults.type === "gourmet" && searchResults.restaurants?.[index]) {
+          const restaurant = searchResults.restaurants[index];
+          const restaurantItemId = restaurant.id?.toString() || itemId;
+          handleSaveToArchive(userId, "gourmet", restaurantItemId, restaurant.name, {
+            code: restaurant.code,
+            address: restaurant.address,
+            catch_copy: restaurant.catch_copy,
+            urls_pc: restaurant.urls_pc,
+            open_hours: restaurant.open_hours,
+          });
+        }
+      }
+    }
+  }, [sendSelectItem, userId, messages, handleSaveToArchive]);
 
   // Push archivable items to storage when they arrive
   useEffect(() => {
@@ -274,29 +360,6 @@ export default function Home() {
     }
   }, [historyLoaded, requestGreeting]);
 
-  // Save to archive - archiveStorage handles state, ChatHistory uses useArchiveStorage hook
-  const handleSaveToArchive = useCallback((
-    userId: string,
-    domain: DomainType,
-    itemId: string,
-    itemTitle?: string,
-    itemData?: Record<string, unknown>
-  ) => {
-    // Call WebSocket save - backend will respond with archive_saved
-    // useWebSocket will update archiveStorage, which triggers re-render via useArchiveStorage hook
-    saveToArchive(userId, domain, itemId, itemTitle, itemData);
-
-    // Optimistically mark as saved in archiveStorage (immediate UI feedback)
-    // Include itemTitle and itemData so the item can be created if it doesn't exist
-    archiveStorage.updateItem(itemId, domain, { 
-      savedAt: new Date(),
-      itemTitle,
-      itemDomain: domain,
-      itemData,
-    });
-    log.debug(`✅ Optimistic save: ${itemId}`);
-  }, [saveToArchive]);
-
   // Send message - cancel all audio and send to backend
   // Only convert to hiragana when movie/gourmet keywords detected (for better search matching)
   // Normal conversation keeps original text for better Claude response quality
@@ -318,10 +381,13 @@ export default function Home() {
     if (command) {
       log.info(`⌨️ Text command detected: ${command.type} (keyword: "${command.keyword}")`);
       
-      // Execute command locally using archive storage (FILO)
+      // Execute command locally with full context (search results, selection, etc.)
       const commandContext: CommandContext = {
         userId,
-        saveToArchive: handleSaveToArchive, // Use wrapper instead of direct function
+        saveToArchive: handleSaveToArchive,
+        originalText: text,
+        messages,
+        selectedIndex: selectedResultIndex,
       };
       
       const result = executeCommand(command.type, commandContext);
@@ -363,7 +429,7 @@ export default function Home() {
       // Normal conversation - send original text
       wsSendMessage(text);
     }
-  }, [wsSendMessage, audioPlayer, waitingPhrase, userId, handleSaveToArchive]);
+  }, [wsSendMessage, audioPlayer, waitingPhrase, userId, handleSaveToArchive, messages, selectedResultIndex]);
 
   // AWS Transcribe for voice input
   const transcribe = useAWSTranscribe({
@@ -423,6 +489,27 @@ export default function Home() {
     checkVoiceActivity();
   }, [checkVoiceActivity]);
 
+  // Compute focused item info for the focus strip in chat section
+  const focusedItem = useMemo(() => {
+    if (selectedResultIndex === null) return null;
+    const lastMsg = [...messages].reverse().find(
+      m => m.role === "assistant" && m.searchResults && m.searchResults.total > 0
+    );
+    if (!lastMsg?.searchResults) return null;
+    const { searchResults } = lastMsg;
+    if (searchResults.type === "movie" && searchResults.movies) {
+      const movie = searchResults.movies[selectedResultIndex];
+      if (!movie) return null;
+      return { name: movie.title_ja, index: selectedResultIndex, itemId: movie.id?.toString() || `movie-${Date.now()}` };
+    }
+    if (searchResults.type === "gourmet" && searchResults.restaurants) {
+      const restaurant = searchResults.restaurants[selectedResultIndex];
+      if (!restaurant) return null;
+      return { name: restaurant.name, index: selectedResultIndex, itemId: restaurant.id?.toString() || `gourmet-${Date.now()}` };
+    }
+    return null;
+  }, [selectedResultIndex, messages]);
+
   // Derive status
   const status: ConversationStatus = useMemo(() => {
     if (audioPlayer.isPlaying) return "speaking";
@@ -476,6 +563,27 @@ export default function Home() {
             onSaveToArchive={handleSaveToArchive}
             textOnly={true}
           />
+          {/* Focus strip - shows when an item is selected via voice/touch */}
+          {focusedItem && (
+            <div className={styles.focusStrip}>
+              <span className={styles.focusNumber}>{focusedItem.index + 1}</span>
+              <span className={styles.focusTitle}>{focusedItem.name}</span>
+              <div className={styles.focusActions}>
+                <button
+                  className={`${styles.focusBtn} ${styles.focusBtnSave}`}
+                  onClick={() => handleCardSelect(focusedItem.index, focusedItem.itemId, "save")}
+                >
+                  保存
+                </button>
+                <button
+                  className={`${styles.focusBtn} ${styles.focusBtnDetail}`}
+                  onClick={() => handleCardSelect(focusedItem.index, focusedItem.itemId, "detail")}
+                >
+                  詳細
+                </button>
+              </div>
+            </div>
+          )}
           <ChatInput
             onSendMessage={sendMessage}
             status={status}
@@ -495,6 +603,8 @@ export default function Home() {
             messages={messages}
             userId={userId}
             onSaveToArchive={handleSaveToArchive}
+            selectedIndex={selectedResultIndex}
+            onCardSelect={handleCardSelect}
           />
         </aside>
       </main>

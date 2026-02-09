@@ -4,7 +4,7 @@ import { createLogger } from "../utils/logger.js";
 import { invokeLLM, invokeLLMStream } from "./claude/provider.js";
 import { detectScenario, buildSystemPrompt } from "./claude/prompts.js";
 import { MOVIE_KEYWORDS, GOURMET_KEYWORDS } from "../constants/keywords.js";
-import type { ConversationTurn, EmotionType, MovieSearchResult } from "../types/index.js";
+import type { ConversationTurn, EmotionType, MovieSearchResult, ActiveResultSet } from "../types/index.js";
 
 const log = createLogger("Claude");
 
@@ -15,7 +15,7 @@ const STOP_SEQUENCES = ["以上です。", "おわり。", "<END>"];
 // 1 sentence ideal, max 2 sentences for natural spoken response
 const MAX_TOKENS_DEFAULT = 100;  // ~40-50 chars, 1-2 short sentences
 const MAX_TOKENS_TOOL = 180;      // Tool use needs slightly more
-const MAX_TOKENS_TOOL_FOLLOWUP = 320;  // Summary of search results, still concise
+const MAX_TOKENS_TOOL_FOLLOWUP = 400;  // Summary of search results with numbered narration (up to 3 items)
 
 // Tool definitions for Claude
 const tools: Anthropic.Tool[] = [
@@ -533,7 +533,8 @@ export async function chat(
   onSentence?: (sentence: string, emotion: EmotionType) => void,
   onToolUse?: () => void,  // Called when tool_use is detected (before DB search)
   userContext?: any,  // User context from user_profile (UserContext type)
-  onGourmetSearch?: (query: string, area?: string, cuisine?: string) => Promise<string>
+  onGourmetSearch?: (query: string, area?: string, cuisine?: string) => Promise<string>,
+  activeResults?: ActiveResultSet | null  // Current active result set for numbered selection context
 ): Promise<ChatResponse> {
   const messages = [
     ...toClaudeMessages(history),
@@ -551,9 +552,9 @@ export async function chat(
     }
   }
 
-  // Detect scenario and build appropriate system prompt
+  // Detect scenario and build appropriate system prompt (with active results context)
   const scenario = detectScenario(userMessage, history);
-  const systemPrompt = buildSystemPrompt(scenario, userContext);
+  const systemPrompt = buildSystemPrompt(scenario, userContext, activeResults);
   
   log.debug(`Scenario detected: ${scenario}`);
 

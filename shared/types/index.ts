@@ -110,6 +110,8 @@ export interface Movie {
   title_ja: string;
   title_en: string | null;
   description: string | null;
+  overview: string | null;
+  poster_path: string | null;
   release_year: number | null;
   rating: number | null;
   director: string | null;
@@ -228,6 +230,44 @@ export interface SearchResults {
   movies?: Movie[];
   restaurants?: GourmetRestaurant[];
   total: number;
+}
+
+// ============================================================================
+// Numbered Selection & Active Results
+// ============================================================================
+
+/**
+ * Active result set for numbered voice selection
+ * Tracks the current search results so users can select by number ("2番")
+ */
+export interface ActiveResultSet {
+  type: "movie" | "gourmet";
+  items: Array<Movie | GourmetRestaurant>;
+  selectedIndex: number | null;  // Currently focused item (0-based)
+  query: string;                 // Original query that produced these results
+  timestamp: number;             // When results were set (for expiry)
+}
+
+/**
+ * Frontend → Backend: User tapped a card or selected by number
+ */
+export interface SelectItemMessage extends WSBaseMessage {
+  type: "select_item";
+  index: number;        // 0-based index in current results
+  itemId: string;
+  action: "focus" | "detail" | "save";
+}
+
+/**
+ * Backend → Frontend: An item was focused/selected (from voice or backend)
+ */
+export interface ItemFocusedMessage extends WSBaseMessage {
+  type: "item_focused";
+  index: number;        // 0-based index
+  itemId: string;
+  domain: DomainType;
+  itemTitle: string;
+  action: "highlight" | "detail" | "save";
 }
 
 // ============================================================================
@@ -666,6 +706,20 @@ export function isErrorMessage(msg: WSBaseMessage): msg is ErrorMessage {
  */
 export function isVoiceEventMessage(msg: WSBaseMessage): msg is VoiceEventMessage {
   return msg.type === "voice_event";
+}
+
+/**
+ * Check if message is a SelectItemMessage
+ */
+export function isSelectItemMessage(msg: WSBaseMessage): msg is SelectItemMessage {
+  return msg.type === "select_item";
+}
+
+/**
+ * Check if message is an ItemFocusedMessage
+ */
+export function isItemFocusedMessage(msg: WSBaseMessage): msg is ItemFocusedMessage {
+  return msg.type === "item_focused";
 }
 
 // ============================================================================

@@ -82,6 +82,8 @@ export async function searchMovies(
       title_ja: item.title_ja || item.title || "",
       title_en: item.title_en || null,
       description: item.description || item.overview || "",
+      overview: item.overview || item.description || null,
+      poster_path: item.poster_path || null,
       release_year: item.release_year || (item.release_date ? new Date(item.release_date).getFullYear() : null),
       rating: item.rating || item.vote_average || null,
       director: item.director || null,

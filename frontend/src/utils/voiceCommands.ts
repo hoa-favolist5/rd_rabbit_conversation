@@ -12,7 +12,7 @@ const log = createLogger("VoiceCommands");
 /**
  * Command types that can be detected
  */
-export type CommandType = "save" | "delete" | "list" | "clear";
+export type CommandType = "save" | "delete" | "list" | "clear" | "select" | "detail" | "next" | "previous";
 
 /**
  * Command detection result
@@ -77,6 +77,41 @@ export const COMMAND_KEYWORDS: Record<CommandType, string[]> = {
     "clear all",
     "delete all",
   ],
+
+  // Select commands - numbered selection ("2番", "二番目")
+  // Note: for numbers beyond this list, detectCommand uses regex fallback
+  select: [
+    // Kanji / Hiragana (single-digit only, no regex equivalent)
+    "一番", "いちばん",
+    "二番", "にばん",
+    "三番", "さんばん",
+    "四番", "よんばん",
+    "五番", "ごばん",
+    // Ordinal selection
+    "最初", "一つ目",
+    "二つ目", "三つ目",
+    // Relative selection
+    "それ", "真ん中",
+  ],
+
+  // Detail commands - ask for more info
+  detail: [
+    "詳しく", "もっと教えて", "それについて",
+    "どんな映画", "どんなお店",
+    "もっと詳しく", "詳細",
+  ],
+
+  // Next commands - show more results
+  next: [
+    "次", "次の", "他にある", "もっと見せて",
+    "次のページ",
+  ],
+
+  // Previous commands - go back
+  previous: [
+    "前の", "戻って", "さっきの",
+    "前のページ",
+  ],
 };
 
 /**
@@ -92,6 +127,12 @@ function normalizeForCommandDetection(text: string): string {
 }
 
 /**
+ * Regex patterns for numbered selection (handles any number: 10番, 12つ目, etc.)
+ * Checked after keyword matching to avoid false positives with save/detail commands
+ */
+const NUMBERED_SELECT_PATTERN = /[1-9]\d*(?:番|つ目|番目|ばん)/;
+
+/**
  * Detect if text contains a command
  * Returns the first matched command with highest confidence
  */
@@ -99,7 +140,7 @@ export function detectCommand(text: string): CommandMatch | null {
   const normalized = text.toLowerCase().trim();
   const cleanNormalized = normalizeForCommandDetection(text);
   
-  // Check each command type
+  // Check each command type via keyword matching
   for (const [commandType, keywords] of Object.entries(COMMAND_KEYWORDS)) {
     for (const keyword of keywords) {
       const keywordLower = keyword.toLowerCase();
@@ -131,75 +172,18 @@ export function detectCommand(text: string): CommandMatch | null {
     }
   }
   
+  // Fallback: detect numbered selection via regex (handles "10番", "12つ目", etc.)
+  const numMatch = text.match(NUMBERED_SELECT_PATTERN);
+  if (numMatch) {
+    log.debug(`✅ Command detected: select (regex: "${numMatch[0]}")`);
+    return {
+      type: "select",
+      matched: true,
+      keyword: numMatch[0],
+      confidence: 0.9,
+    };
+  }
+  
   return null;
 }
 
-/**
- * Check if text is ONLY a command (no other content)
- * Useful for deciding whether to send to backend
- */
-export function isCommandOnly(text: string): boolean {
-  const command = detectCommand(text);
-  if (!command) return false;
-  
-  // Use the same normalization function for consistency
-  const cleanText = normalizeForCommandDetection(text);
-  const cleanKeyword = normalizeForCommandDetection(command.keyword);
-  
-  return cleanText === cleanKeyword;
-}
-
-/**
- * Extract command and remaining text
- * Useful for commands that have parameters
- */
-export function parseCommand(text: string): {
-  command: CommandMatch | null;
-  remainingText: string;
-} {
-  const command = detectCommand(text);
-  
-  if (!command) {
-    return { command: null, remainingText: text };
-  }
-  
-  // Remove command keyword from text
-  const normalized = text.toLowerCase();
-  const keywordLower = command.keyword.toLowerCase();
-  const index = normalized.indexOf(keywordLower);
-  
-  let remainingText = text;
-  if (index !== -1) {
-    remainingText = 
-      text.substring(0, index) + 
-      text.substring(index + command.keyword.length);
-    remainingText = remainingText.trim();
-  }
-  
-  return { command, remainingText };
-}
-
-/**
- * Add new command keywords dynamically
- * Useful for user customization or A/B testing
- */
-export function addCommandKeyword(type: CommandType, keyword: string): void {
-  if (!COMMAND_KEYWORDS[type].includes(keyword)) {
-    COMMAND_KEYWORDS[type].push(keyword);
-    log.info(`➕ Added new keyword for ${type}: "${keyword}"`);
-  }
-}
-
-/**
- * Get all keywords for a command type
- */
-export function getCommandKeywords(type: CommandType): string[] {
-  return [...COMMAND_KEYWORDS[type]];
-}
-
-/**
- * Get all available command types
- */
-export function getAvailableCommands(): CommandType[] {
-  return Object.keys(COMMAND_KEYWORDS) as CommandType[];
-}
