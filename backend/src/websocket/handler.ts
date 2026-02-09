@@ -74,36 +74,6 @@ type SetUserInfoMessage = { type: "set_user_info"; userId?: string; userName?: s
 type SaveArchiveMessage = { type: "save_archive"; userId: string; domain: DomainType; itemId: string; itemTitle?: string; itemData?: Record<string, unknown> };
 type RequestGreetingMessage = { type: "request_greeting" };
 
-// Legacy type aliases for backward compatibility
-type LegacyStatusMessage = {
-  type: "status";
-  status: ConversationStatus;
-  emotion: EmotionType;
-  statusText: string;
-};
-type LegacyUserMessage = { type: "user_message"; text: string };
-type LegacyAssistantMessage = {
-  type: "assistant_message";
-  text: string;
-  emotion: EmotionType;
-  messageId?: string;
-  domain?: DomainType;
-  archiveItem?: ArchiveItemInfo;
-  searchResults?: SearchResults;
-};
-type LegacyErrorMessage = { type: "error"; message: string };
-type LegacyLongWaitingMessage = {
-  type: "long_waiting";
-  audio: string;
-  text: string;
-  responseId?: string;
-};
-type SetUserInfoMessage = { type: "set_user_info"; userId?: string; userName?: string; userToken?: string };
-type SaveArchiveMessage = { type: "save_archive"; userId: string; domain: DomainType; itemId: string; itemTitle?: string; itemData?: Record<string, unknown> };
-type RequestGreetingMessage = { type: "request_greeting" };
-
-import { saveToArchive, getFriendsWhoSavedItem } from "../db/user-archive.js";
-
 // Configuration for parallel TTS streaming (TEN Framework inspired)
 const ENABLE_PARALLEL_TTS = true;
 const MIN_SENTENCE_LENGTH_FOR_TTS = 5;
@@ -673,30 +643,6 @@ function getItemId(item: Movie | GourmetRestaurant, type: "movie" | "gourmet"): 
 
 // Active results expiry: 10 minutes
 const ACTIVE_RESULTS_EXPIRY_MS = 10 * 60 * 1000;
-
-/**
- * Format gourmet search results for LLM
- */
-function formatGourmetResults(result: import("../types/index.js").GourmetSearchResult): string {
-  if (result.restaurants.length === 0) {
-    return JSON.stringify({ found: 0 });
-  }
-
-  const compact = result.restaurants.slice(0, 5).map(r => ({
-    name: r.name,
-    addr: r.address,
-    copy: r.catch_copy,
-    access: r.access,
-    hours: r.open_hours,
-  }));
-
-  // Log formatted results being sent to LLM
-  const names = result.restaurants.slice(0, 3).map(r => r.name).join(", ");
-  const more = result.restaurants.length > 3 ? ` +${result.restaurants.length - 3} more` : "";
-  createLogger("Gourmet").debug(`📤 Formatted ${result.restaurants.length} results for LLM: ${names}${more}`);
-
-  return JSON.stringify(compact);
-}
 
 /**
  * Format gourmet search results for LLM
