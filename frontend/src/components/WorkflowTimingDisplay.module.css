@@ -1,0 +1,147 @@
+.container {
+  background: linear-gradient(180deg, rgba(26, 26, 46, 0.95) 0%, rgba(22, 33, 62, 0.95) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  padding: 16px;
+  min-width: 300px;
+  max-width: 340px;
+  backdrop-filter: blur(8px);
+}
+
+/* Key Metrics */
+.metrics {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.metric {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+}
+
+.metricIcon {
+  font-size: 16px;
+}
+
+.metricContent {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.metricLabel {
+  font-size: 10px;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.metricValue {
+  font-size: 14px;
+  font-weight: 700;
+  font-family: "SF Mono", Monaco, monospace;
+}
+
+/* Timeline */
+.timeline {
+  margin-bottom: 14px;
+}
+
+.timelineTrack {
+  height: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 4px;
+  position: relative;
+  overflow: hidden;
+}
+
+.timelineBar {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  min-width: 3px;
+  border-radius: 2px;
+  transition: opacity 0.2s;
+}
+
+.timelineBar:hover {
+  opacity: 0.8;
+}
+
+/* Steps */
+.steps {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.stepIcon {
+  font-size: 12px;
+  width: 18px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.stepName {
+  font-size: 11px;
+  color: #94a3b8;
+  min-width: 100px;
+  flex-shrink: 0;
+}
+
+.stepBar {
+  flex: 1;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.stepBarFill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+.stepTime {
+  font-size: 11px;
+  font-weight: 600;
+  font-family: "SF Mono", Monaco, monospace;
+  min-width: 50px;
+  text-align: right;
+}
+
+/* Tool Info */
+.toolInfo {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 11px;
+  color: #64748b;
+  text-align: center;
+}
+
+/* Responsive */
+@media (max-width: 400px) {
+  .container {
+    min-width: 260px;
+    padding: 12px;
+  }
+
+  .stepName {
+    min-width: 80px;
+    font-size: 10px;
+  }
+}
