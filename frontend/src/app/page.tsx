@@ -537,16 +537,20 @@ export default function Home() {
     return null;
   }, [selectedResultIndex, messages]);
 
-  // Derive status
+  // Derive status — only show "speaking" avatar when audio is actually playing
   const status: ConversationStatus = useMemo(() => {
     if (audioPlayer.isPlaying) return "speaking";
+    // Backend may send "speaking" before audio starts; keep "thinking" until playback begins
+    if (wsStatus === "speaking") return "thinking";
     return wsStatus;
   }, [audioPlayer.isPlaying, wsStatus]);
 
   const displayStatusText = useMemo(() => {
     if (audioPlayer.isPlaying) return "話しています...";
+    // Backend may send "speaking" status text before audio starts; show thinking text instead
+    if (wsStatus === "speaking") return "考え中...";
     return statusText;
-  }, [audioPlayer.isPlaying, statusText]);
+  }, [audioPlayer.isPlaying, wsStatus, statusText]);
 
   return (
     <div className={styles.container}>
